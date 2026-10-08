@@ -9,130 +9,93 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_TOKEN || process.env.TOKEN;
 const SHEET_ID = '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
-const GROQ_KEY = process.env.GROQ_API_KEY;
-
 const bot = new Telegraf(BOT_TOKEN);
-let cachePlanilha = { dados: null, hora: 0 };
 
+let cachePlanilha = { dados: null, hora: 0 };
+let esperandoFiltro = {};
+
+// Lê planilha
 async function lerPlanilhaCompleta() {
   if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Sheet1`;
-  try {
-    const { data } = await axios.get(url);
-    const linhas = data.split('\n').filter(l => l.trim());
-    const cabecalho = linhas[0].split(',').map(h => h.replace(/"/g,'').trim());
-    const dados = [];
-    for(let i=1; i < linhas.length; i++) {
-      const cols = linhas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g,'').trim());
-      let obj = {};
-      cabecalho.forEach((h, idx) => obj[h] = cols[idx] || '');
-      obj._textoBusca = cols.join(' ').toLowerCase();
-      dados.push(obj);
-    }
-    const res = { cabecalho, dados, csv: data.substring(0,15000) };
-    cachePlanilha = { dados: res, hora: Date.now() };
-    return res;
-  } catch(e) { if(cachePlanilha.dados) return cachePlanilha.dados; throw e; }
+  const { data } = await axios.get(url);
+  const linhas = data.split('\n').filter(l => l.trim());
+  const cabecalho = linhas[0].split(',').map(h => h.replace(/"/g,'').trim().toUpperCase()); // tudo maiúsculo igual seu print
+  const dados = [];
+  for(let i=1; i < linhas.length; i++) {
+    const cols = linhas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g,'').trim());
+    let obj = {};
+    cabecalho.forEach((h, idx) => obj[h] = cols[idx] || '');
+    obj._textoBusca = Object.values(obj).join(' ').toLowerCase();
+    dados.push(obj);
+  }
+  const res = { cabecalho, dados };
+  cachePlanilha = { dados: res, hora: Date.now() };
+  return res;
 }
 
-const menuPrincipal = Markup.inlineKeyboard([
-  [Markup.button.callback('🔧 Buscar por Código', 'buscar_codigo')],
-  [Markup.button.callback('📝 Buscar por Sintoma', 'buscar_sintoma')],
-  [Markup.button.callback('📊 Últimas 5 OS', 'ultimas')],
-  [Markup.button.callback('🆘 Ajuda', 'ajuda')]
+const menuFiltros = Markup.inlineKeyboard([
+  [Markup.button.callback('🔢 OS', 'filtro_OS'), Markup.button.callback('🏭 SETOR', 'filtro_SETOR')],
+  [Markup.button.callback('👥 GRUPO', 'filtro_GRUPO'), Markup.button.callback('🔧 CODIGO', 'filtro_CODIGO')],
+  [Markup.button.callback('📦 FAMILIA', 'filtro_FAMILIA'), Markup.button.callback('🔍 SUBCONJUNTO', 'filtro_SUBCONJUNTO')],
+  [Markup.button.callback('📊 MENU', 'menu_todos')]
 ]);
 
 bot.start(async (ctx) => {
-  await ctx.reply(`🔮 *ORÁCULO DA MANUTENÇÃO*\n\nFala ${ctx.from.first_name}! Sou seu assistente técnico.\nO que você precisa hoje?`, { parse_mode: 'Markdown',...menuPrincipal });
+  await ctx.reply(`🔮 *ORÁCULO DA MANUTENÇÃO*\n\nFala ${ctx.from.first_name}! Planilha conectada ✅\n\n*Colunas detectadas:*\nOS | CODIGO | GRUPO | FAMILIA | SETOR\n\nComo quer buscar?`, { parse_mode: 'Markdown',...menuFiltros });
 });
 
-bot.action('buscar_codigo', async (ctx) => {
+bot.action('menu_todos', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('🔧 *Me manda o número da OS ou do código da falha:*\nEx: 25295069', { parse_mode: 'Markdown' });
+  await ctx.reply('Escolha o filtro:', menuFiltros);
 });
 
-bot.action('buscar_sintoma', async (ctx) => {
+bot.action(/filtro_(.+)/, async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('📝 *Descreva o que está acontecendo:*\nEx: motor da ponte não liga, faz barulho\n\nPode escrever do seu jeito que eu entendo!', { parse_mode: 'Markdown' });
-});
-
-bot.action('ultimas', async (ctx) => {
-  await ctx.answerCbQuery();
-  const { dados } = await lerPlanilhaCompleta();
-  const ultimas = dados.slice(-5).reverse();
-  let resp = `📊 *ÚLTIMAS 5 OS CADASTRADAS:*\n\n`;
-  ultimas.forEach((os,i) => {
-    const codigo = Object.values(os)[0] || 'Sem código';
-    resp += `${i+1}. ${codigo} - ${os._textoBusca.substring(0,60)}...\n`;
-  });
-  await ctx.reply(resp, { parse_mode: 'Markdown',...menuPrincipal });
-});
-
-bot.action('ajuda', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply(`🆘 *COMO USAR O ORÁCULO:*\n\n1️⃣ Clique em Buscar por Código se tiver o número\n2️⃣ Clique em Buscar por Sintoma se não tiver\n3️⃣ Eu busco na planilha e te dou a solução\n\n*Dica:* Pode mandar áudio? Ainda não, mas em breve!\n\nQuer falar com um humano? Digite: especialista`, { parse_mode: 'Markdown',...menuPrincipal });
+  const tipo = ctx.match[1]; // OS, SETOR, etc - já em maiúsculo
+  esperandoFiltro[ctx.from.id] = tipo;
+  await ctx.reply(`🔍 *Filtro: ${tipo}*\n\nDigite o que quer buscar em *${tipo}*:\nEx: se escolheu SETOR, digite BRITAGEM ou TAMBOR`, { parse_mode: 'Markdown' });
 });
 
 bot.on('text', async (ctx) => {
+  const id = ctx.from.id;
   const textoOriginal = ctx.message.text.trim();
-  if(textoOriginal.startsWith('/')) return;
+  if (textoOriginal.startsWith('/')) return;
   const texto = textoOriginal.toLowerCase();
 
-  if (texto.includes('especialista') || texto.includes('humano')) {
-    return ctx.reply('🆘 *Acionando especialista...*\n\nEnquanto isso, me conta qual equipamento e qual falha que eu já vou adiantando a busca.', { parse_mode: 'Markdown' });
-  }
+  try {
+    const { cabecalho, dados } = await lerPlanilhaCompleta();
+    const filtroAtivo = esperandoFiltro[id];
+    let encontradas = [];
 
-  await ctx.sendChatAction('typing');
-  const { dados } = await lerPlanilhaCompleta();
-  let encontradas = dados.filter(d => d._textoBusca.includes(texto)).slice(0, 3);
-
-  if (encontradas.length === 0) {
-    const palavras = texto.split(' ').filter(p => p.length > 2);
-    encontradas = dados.filter(d => palavras.some(p => d._textoBusca.includes(p))).slice(0, 3);
-  }
-
-  if (encontradas.length > 0) {
-    for (const os of encontradas) {
-      let resp = `✅ *ENCONTREI ESSA OS:*\n\n`;
-      Object.entries(os).forEach(([k,v]) => { if(k!=='_textoBusca' && v) resp += `*${k}:* ${v}\n`; });
-      resp += `\n`;
-      await ctx.reply(resp, { parse_mode: 'Markdown' });
-
-      await ctx.reply('Essa solução resolveu?', Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Sim, resolveu!', 'resolveu'), Markup.button.callback('❌ Não resolveu', 'n_resolveu')],
-        [Markup.button.callback('🔙 Menu', 'menu')]
-      ]));
+    if (filtroAtivo && cabecalho.includes(filtroAtivo)) {
+      encontradas = dados.filter(d => (d[filtroAtivo] || '').toLowerCase().includes(texto)).slice(0, 5);
+      delete esperandoFiltro[id];
+    } else {
+      encontradas = dados.filter(d => d._textoBusca.includes(texto)).slice(0, 5);
     }
-  } else {
-    await ctx.reply(`🤔 *Não achei "${textoOriginal}" exato na planilha.*\n\nQuer tentar de outro jeito ou quer que eu acione a IA para diagnosticar?`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('🤖 Tentar com IA', 'usar_ia')],
-        [Markup.button.callback('🔙 Voltar ao Menu', 'menu')]
-      ])
-    );
-    // Guarda a pergunta pra usar com IA depois
-    ctx.session = { ultimaPergunta: textoOriginal };
+
+    if (encontradas.length > 0) {
+      await ctx.reply(`✅ *${encontradas.length} ENCONTRADAS EM ${filtroAtivo || 'GERAL'}: ${textoOriginal.toUpperCase()}*`, { parse_mode: 'Markdown' });
+      for (const os of encontradas) {
+        let resp = `*━━━━━━━━━━━━━━━*\n`;
+        resp += `*OS:* ${os['OS'] || '-'}\n`;
+        resp += `*CODIGO:* ${os['CODIGO'] || '-'}\n`;
+        resp += `*SUBCONJUNTO:* ${os['SUBCONJUNTO'] || '-'}\n`;
+        resp += `*GRUPO:* ${os['GRUPO'] || '-'} | *FAMILIA:* ${os['FAMILIA'] || '-'}\n`;
+        resp += `*SETOR:* ${os['SETOR'] || '-'}\n`;
+        resp += `*STATUS:* ${os['STATUS'] || '-'}\n`;
+        resp += `*EMISSÃO:* ${os['EMISSÃO'] || os['EMISSAO'] || '-'}\n`;
+        await ctx.reply(resp, { parse_mode: 'Markdown' });
+      }
+      await ctx.reply('Fazer nova busca?', menuFiltros);
+    } else {
+      await ctx.reply(`❌ Nenhuma OS com *${filtroAtivo || ''} = ${textoOriginal}*\n\nTente outro termo:`, { parse_mode: 'Markdown',...menuFiltros });
+      delete esperandoFiltro[id];
+    }
+  } catch (e) {
+    await ctx.reply('⚠️ Erro: ' + e.message);
   }
-});
-
-bot.action('menu', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('🔮 Menu principal:', menuPrincipal);
-});
-
-bot.action('resolveu', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('🎉 *Ótimo!* Fico feliz em ajudar!\n\nPrecisa de mais alguma coisa?', menuPrincipal);
-});
-
-bot.action('n_resolveu', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('😕 Entendi. Vou buscar outras OS parecidas ou acionar um especialista.\n\nMe descreve melhor o que acontece?', { parse_mode: 'Markdown' });
-});
-
-bot.action('usar_ia', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('🤖 Acionando IA... (coloque a GROQ_API_KEY no Render para ativar)');
 });
 
 app.get('/', (req, res) => res.json({ ok: true }));
@@ -140,5 +103,5 @@ app.use(bot.webhookCallback('/telegram'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   await bot.telegram.setWebhook(`https://oraculo-api-7ozv.onrender.com/telegram`);
-  console.log('Oráculo Interativo Online');
+  console.log('Oráculo com filtros OFICIAIS online');
 });
