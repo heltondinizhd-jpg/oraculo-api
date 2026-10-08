@@ -1,4 +1,3 @@
-
 const { Telegraf, Markup } = require('telegraf');
 const { google } = require('googleapis');
 
@@ -18,15 +17,21 @@ async function getSheet() {
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}`,
   });
-  return res.data.values;
+  return res.data.values || [];
 }
 
 function calcularLeadTime(dataStr) {
   if (!dataStr) return 0;
-  const data = new Date(dataStr);
+  let data;
+  // Suporte para dd/mm/aaaa
+  if (dataStr.includes('/')) {
+    const [d, m, y] = dataStr.split('/');
+    data = new Date(`${y}-${m}-${d}`);
+  } else {
+    data = new Date(dataStr);
+  }
   if (isNaN(data)) return 0;
-  const hoje = new Date();
-  return Math.floor((hoje - data) / (1000 * 60 * 60 * 24));
+  return Math.floor((new Date() - data) / (1000 * 60 * 60 * 24));
 }
 
 function getCriticidade(dias) {
@@ -42,54 +47,75 @@ const menu = Markup.keyboard([
   ['Familia', 'Setor']
 ]).resize();
 
-bot.start((ctx) => {
-  const nome = ctx.from.first_name || 'cliente';
-  const texto = 
-`Ola, ${nome}!
+const textoSaudacao = (nome) =>
+`Olá, ${nome}!
 
-Prezado cliente da Oficina Central, bem-vindo ao canal exclusivo de Ordens de Restauracao - ZROF.
+Prezado cliente da Oficina Central, bem-vindo ao canal exclusivo de Ordens de Restauração - ZROF.
 
-Esta aplicacao e destinada a gestao de demandas ZROF, tratadas de forma planejada, com maior nivel de qualidade e controle de informacoes.
+Esta aplicação é destinada à gestão de demandas ZROF, tratadas de forma planejada, com maior nível de qualidade e controle de informações.
 
 Criticidade por Lead Time:
-IMEDIATA >=180d | URGENTE 150-179d | PRIORITARIO 120-149d
+IMEDIATA >=180d | URGENTE 150-179d | PRIORITÁRIO 120-149d
 
 Utilize o menu abaixo.`;
-  return ctx.reply(texto, menu);
-});
+
+bot.start((ctx) => ctx.reply(textoSaudacao(ctx.from.first_name || 'cliente'), menu));
+bot.command('start', (ctx) => ctx.reply(textoSaudacao(ctx.from.first_name || 'cliente'), menu));
 
 bot.hears('Resumo', async (ctx) => {
-  const dados = await getSheet();
-  ctx.reply(`Total: ${dados.length - 1} ordens`);
+  try {
+    const dados = await getSheet();
+    return ctx.reply(`Total: ${dados.length - 1} ordens`, menu);
+  } catch (e) {
+    return ctx.reply('Erro ao ler planilha. Verifique SHEET_ID.', menu);
+  }
 });
 
 bot.hears('Alertas', async (ctx) => {
-  const dados = await getSheet();
-  const header = dados[0];
-  const idxOS = 0;
-  const idxData = header.findIndex(h => h.toLowerCase().includes('data'));
-  let alertas = [];
-  dados.slice(1).forEach(l => {
-    const dias = calcularLeadTime(l[idxData]);
-    if (dias >= 120) alertas.push({ os: l[idxOS], dias, crit: getCriticidade(dias) });
-  });
-  alertas.sort((a,b) => b.dias - a.dias);
-  if (alertas.length === 0) return ctx.reply('Nenhuma ordem >120 dias');
-  let msg = `ORDENS >120 DIAS (${alertas.length})\n\n`;
-  alertas.slice(0, 15).forEach(a => { msg += `${a.crit} - OS ${a.os} - ${a.dias}d\n`; });
-  ctx.reply(msg);
+  try {
+    const dados = await getSheet();
+    const header = dados[0] || [];
+    const idxOS = 0;
+    const idxData = header.findIndex(h => h.toLowerCase().includes('data'));
+    if (idxData === -1) return ctx.reply('Coluna de data não encontrada', menu);
+
+    let alertas = [];
+    dados.slice(1).forEach(l => {
+      const dias = calcularLeadTime(l[idxData]);
+      if (dias >= 120) alertas.push({ os: l[idxOS], dias, crit: getCriticidade(dias) });
+    });
+    alertas.sort((a,b) => b.dias - a.dias);
+    if (alertas.length === 0) return ctx.reply('Nenhuma ordem >120 dias', menu);
+    let msg = `ORDENS >120 DIAS (${alertas.length})\n\n`;
+    alertas.slice(0, 15).forEach(a => { msg += `${a.crit} - OS ${a.os} - ${a.dias}d\n`; });
+    return ctx.reply(msg, menu);
+  } catch (e) {
+    return ctx.reply('Erro ao buscar alertas', menu);
+  }
 });
 
+const BOTOES = ['Resumo','Alertas','Buscar OS','Buscar Codigo','Familia','Setor'];
+
 bot.on('text', async (ctx) => {
-  if (ctx.message.text.startsWith('/')) return;
-  const termo = ctx.message.text.toLowerCase();
-  const dados = await getSheet();
-  const resultados = dados.slice(1).filter(l => l.join(' ').toLowerCase().includes(termo)).slice(0, 10);
-  if (resultados.length === 0) return ctx.reply(`Nenhum resultado para "${ctx.message.text}"`);
-  let msg = `${resultados.length} resultados:\n\n`;
-  resultados.forEach(l => { msg += `OS: ${l[0]}\n`; });
-  ctx.reply(msg);
+  const txt = ctx.message.text;
+  if (txt.startsWith('/')) return;
+  if (BOTOES.includes(txt)) return; // não deixa o buscador engolir o menu
+
+  try {
+    const dados = await getSheet();
+    const resultados = dados.slice(1).filter(l => l.join(' ').toLowerCase().includes(txt.toLowerCase())).slice(0, 10);
+    if (resultados.length === 0) return ctx.reply(`Nenhum resultado para "${txt}"`, menu);
+    let msg = `${resultados.length} resultados:\n\n`;
+    resultados.forEach(l => { msg += `OS: ${l[0]}\n`; });
+    return ctx.reply(msg, menu);
+  } catch (e) {
+    return ctx.reply('Erro na busca', menu);
+  }
 });
 
 bot.launch();
-console.log('Bot rodando');
+console.log('Bot rodando - ZROF');
+
+// Evita queda no Render
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
