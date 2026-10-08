@@ -1,3 +1,4 @@
+
 const { Telegraf, Markup } = require('telegraf');
 const { google } = require('googleapis');
 
@@ -41,32 +42,25 @@ const menu = Markup.keyboard([
   ['Familia', 'Setor']
 ]).resize();
 
-const TEXTO_SAUDACAO = (nome) => 
-`Olá, ${nome}!
-
-Prezado cliente da Oficina Central, bem-vindo ao canal exclusivo de Ordens de Restauração - ZROF.
-
-Esta aplicação é destinada à gestão de demandas ZROF, tratadas de forma planejada, com maior nível de qualidade e controle de informações.
-
-Criticidade por Lead Time:
-IMEDIATA >=180d | URGENTE 150-179d | PRIORITÁRIO 120-149d
-
-Utilize o menu abaixo.`;
-
 bot.start((ctx) => {
   const nome = ctx.from.first_name || 'cliente';
-  return ctx.reply(TEXTO_SAUDACAO(nome), menu);
-});
+  const texto = 
+`Ola, ${nome}!
 
-// Garante que /start funciona mesmo com cache
-bot.command('start', (ctx) => {
-  const nome = ctx.from.first_name || 'cliente';
-  return ctx.reply(TEXTO_SAUDACAO(nome), menu);
+Prezado cliente da Oficina Central, bem-vindo ao canal exclusivo de Ordens de Restauracao - ZROF.
+
+Esta aplicacao e destinada a gestao de demandas ZROF, tratadas de forma planejada, com maior nivel de qualidade e controle de informacoes.
+
+Criticidade por Lead Time:
+IMEDIATA >=180d | URGENTE 150-179d | PRIORITARIO 120-149d
+
+Utilize o menu abaixo.`;
+  return ctx.reply(texto, menu);
 });
 
 bot.hears('Resumo', async (ctx) => {
   const dados = await getSheet();
-  ctx.reply(`Total: ${dados.length - 1} ordens`, menu);
+  ctx.reply(`Total: ${dados.length - 1} ordens`);
 });
 
 bot.hears('Alertas', async (ctx) => {
@@ -80,23 +74,22 @@ bot.hears('Alertas', async (ctx) => {
     if (dias >= 120) alertas.push({ os: l[idxOS], dias, crit: getCriticidade(dias) });
   });
   alertas.sort((a,b) => b.dias - a.dias);
-  if (alertas.length === 0) return ctx.reply('Nenhuma ordem >120 dias', menu);
+  if (alertas.length === 0) return ctx.reply('Nenhuma ordem >120 dias');
   let msg = `ORDENS >120 DIAS (${alertas.length})\n\n`;
   alertas.slice(0, 15).forEach(a => { msg += `${a.crit} - OS ${a.os} - ${a.dias}d\n`; });
-  ctx.reply(msg, menu);
+  ctx.reply(msg);
 });
 
 bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
-  if (['Resumo','Alertas','Buscar OS','Buscar Codigo','Familia','Setor'].includes(ctx.message.text)) return;
   const termo = ctx.message.text.toLowerCase();
   const dados = await getSheet();
   const resultados = dados.slice(1).filter(l => l.join(' ').toLowerCase().includes(termo)).slice(0, 10);
-  if (resultados.length === 0) return ctx.reply(`Nenhum resultado para "${ctx.message.text}"`, menu);
+  if (resultados.length === 0) return ctx.reply(`Nenhum resultado para "${ctx.message.text}"`);
   let msg = `${resultados.length} resultados:\n\n`;
   resultados.forEach(l => { msg += `OS: ${l[0]}\n`; });
-  ctx.reply(msg, menu);
+  ctx.reply(msg);
 });
 
 bot.launch();
-console.log('Bot rodando com saudacao');
+console.log('Bot rodando');
