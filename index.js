@@ -1,4 +1,4 @@
-require('dotenv').config();
+
 const { Telegraf, Markup } = require('telegraf');
 const { google } = require('googleapis');
 
