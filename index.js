@@ -23,7 +23,6 @@ async function getSheet() {
 function calcularLeadTime(dataStr) {
   if (!dataStr) return 0;
   let data;
-  // Suporte para dd/mm/aaaa
   if (dataStr.includes('/')) {
     const [d, m, y] = dataStr.split('/');
     data = new Date(`${y}-${m}-${d}`);
@@ -78,7 +77,6 @@ bot.hears('Alertas', async (ctx) => {
     const idxOS = 0;
     const idxData = header.findIndex(h => h.toLowerCase().includes('data'));
     if (idxData === -1) return ctx.reply('Coluna de data não encontrada', menu);
-
     let alertas = [];
     dados.slice(1).forEach(l => {
       const dias = calcularLeadTime(l[idxData]);
@@ -99,8 +97,7 @@ const BOTOES = ['Resumo','Alertas','Buscar OS','Buscar Codigo','Familia','Setor'
 bot.on('text', async (ctx) => {
   const txt = ctx.message.text;
   if (txt.startsWith('/')) return;
-  if (BOTOES.includes(txt)) return; // não deixa o buscador engolir o menu
-
+  if (BOTOES.includes(txt)) return;
   try {
     const dados = await getSheet();
     const resultados = dados.slice(1).filter(l => l.join(' ').toLowerCase().includes(txt.toLowerCase())).slice(0, 10);
@@ -116,6 +113,5 @@ bot.on('text', async (ctx) => {
 bot.launch();
 console.log('Bot rodando - ZROF');
 
-// Evita queda no Render
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
