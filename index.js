@@ -12,7 +12,6 @@ const app = express();
 let cachePlanilha = { dados: null, hora: 0 };
 let esperandoFiltro = {};
 
-// LEITURA COMPLETA COM PAGINAÇÃO (resolve quantidade inferior)
 async function lerPlanilhaCompleta() {
   if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
   async function parseCSV(text) {
@@ -64,7 +63,6 @@ const menuFiltros = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATU
 
 bot.start(async (ctx) => { await ctx.reply('🤖 Bot de Ordens - Dashboard Ativo', menuFiltros); });
 bot.command('limpar', async (ctx) => { cachePlanilha={dados:null,hora:0}; await ctx.reply('Cache limpo!'); });
-
 bot.command('resumo', async (ctx) => {
   const { dados } = await lerPlanilhaCompleta();
   let txt = `📊 *RESUMO GERAL: ${dados.length} OS*\n`;
@@ -72,24 +70,20 @@ bot.command('resumo', async (ctx) => {
   Object.entries(porSetor).forEach(([k,v])=> txt+= `${k}: ${v}\n`);
   await ctx.reply(txt, { parse_mode: 'Markdown',...menuFiltros });
 });
-
 bot.command('alertas', async (ctx) => {
   const { dados } = await lerPlanilhaCompleta();
   const criticas = dados.filter(d=>d._leadTime>30);
   await ctx.reply(`🚨 *${criticas.length} OS com LEAD > 30 dias*`, { parse_mode: 'Markdown' });
 });
-
 bot.command('dashboard', async (ctx) => {
   await ctx.reply(`📈 Dashboard: https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'seu-app.onrender.com'}/dashboard`);
 });
-
 bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], async (ctx) => {
   const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
   esperandoFiltro[ctx.from.id]=mapa[ctx.message.text];
   await ctx.reply(`Digite o valor para ${ctx.message.text}:`);
 });
 
-// AQUI ESTÁ A SUA REGRA: INDIVIDUAL = TUDO / VARIAS = 1 LINHA CADA
 bot.on('text', async (ctx) => {
   const textoOriginal = ctx.message.text.trim(); if (textoOriginal.startsWith('/')) return;
   const id = ctx.from.id; const texto = textoOriginal.toLowerCase();
@@ -100,9 +94,9 @@ bot.on('text', async (ctx) => {
   if (encontradas.length===0) { await ctx.reply(`❌ Nada para "${textoOriginal}"`, {...menuFiltros}); return; }
 
   if (encontradas.length===1) {
-    const os = encontradas[0]; let r = `🔍 *FICHA COMPLETA OS ${os['OS']}*\n━━━━━━━━━━━━\n`;
+    const os = encontradas[0];
+    let r = `🔍 *FICHA COMPLETA OS ${os['OS']}*\n━━━━━━━━━━━━\n`;
     cabecalho.forEach(col=>{ if(!col.startsWith('_')) r+=`*${col}:* ${os[col]||'-'}\n`; });
-    r+=`*LEAD CALCULADO:* ${os._leadTime} dias\n*EMISSÃO RAW:* ${os._emissaoRaw}\n`;
     await ctx.reply(r.substring(0,4096), { parse_mode: 'Markdown',...menuFiltros });
     return;
   }
@@ -116,7 +110,6 @@ bot.on('text', async (ctx) => {
   await ctx.reply(`Total: ${encontradas.length} OS`, menuFiltros);
 });
 
-// DASHBOARD WEB
 app.get('/dashboard', async (req,res) => {
   const { dados } = await lerPlanilhaCompleta();
   let html = `<h1>Dashboard - ${dados.length} OS</h1><table border=1><tr><th>OS</th><th>CODIGO</th><th>EMISSÃO</th><th>SETOR</th><th>STATUS</th><th>LEAD</th></tr>`;
