@@ -10,76 +10,70 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_TOKEN || process.env.TOKEN;
 const SHEET_ID = '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
 
-console.log('Iniciando Oráculo... Sheet:', SHEET_ID);
-
 const bot = new Telegraf(BOT_TOKEN);
 
 async function buscarNaPlanilha(codigoBuscado) {
-  try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=0`;
-    const { data } = await axios.get(url);
-    const linhas = data.split('\n').map(l => l.trim()).filter(l => l);
+  // 3 URLs diferentes que o Google aceita
+  const urls = [
+    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Sheet1`,
+    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv`,
+    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`
+  ];
 
-    if (linhas.length < 2) return null;
+  for (const url of urls) {
+    try {
+      console.log('Tentando URL:', url);
+      const { data } = await axios.get(url, { timeout: 10000 });
 
-    const cabecalho = linhas[0].split(',').map(h => h.replace(/"/g,'').trim());
+      if (!data || data.includes('<HTML>') || data.includes('<!DOCTYPE')) continue;
 
-    for (let i = 1; i < linhas.length; i++) {
-      // Divide respeitando aspas
-      const colunas = linhas[i].match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || linhas[i].split(',');
-      const limpas = colunas.map(c => c.replace(/^"|"$/g, '').trim());
+      const linhas = data.split('\n').filter(l => l.trim());
+      const cabecalho = linhas[0].split(',').map(h => h.replace(/"/g,'').trim());
 
-      // Verifica se o código está em QUALQUER coluna
-      const textoLinha = limpas.join(' ').toLowerCase();
-      if (textoLinha.includes(codigoBuscado.toLowerCase())) {
-        let resposta = `🔮 *ORÁCULO - CÓDIGO ${codigoBuscado}*\n\n`;
-        cabecalho.forEach((nome, idx) => {
-          if (limpas[idx]) {
-            resposta += `*${nome}:* ${limpas[idx]}\n`;
-          }
-        });
-        return resposta;
+      for (let i = 1; i < linhas.length; i++) {
+        if (linhas[i].toLowerCase().includes(codigoBuscado.toLowerCase())) {
+          const colunas = linhas[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g,'').trim());
+          let resposta = `🔮 *ORÁCULO - CÓDIGO ${codigoBuscado}*\n\n`;
+          cabecalho.forEach((nome, idx) => {
+            if (colunas[idx] && colunas[idx].length > 0) {
+              resposta += `*${nome}:* ${colunas[idx]}\n`;
+            }
+          });
+          return resposta;
+        }
       }
+      return null; // tentou e não achou
+    } catch (e) {
+      console.log('Falhou URL:', url, e.message);
+      continue;
     }
-    return null;
-  } catch (err) {
-    console.log('Erro ao buscar planilha:', err.message);
-    return 'ERRO_PLANILHA: ' + err.message;
   }
+  return 'ERRO_PLANILHA';
 }
 
-bot.start((ctx) => ctx.reply('🔮 Oráculo da Manutenção Online!\n\nMe mande o código da falha (ex: 25295069) que eu busco na planilha.'));
+bot.start((ctx) => ctx.reply('🔮 Oráculo Online! Mande o código.'));
 
 bot.on('text', async (ctx) => {
   const codigo = ctx.message.text.trim();
-  if (codigo.length < 2) return;
-
-  await ctx.reply(`🔧 Buscando *${codigo}* na planilha...`, { parse_mode: 'Markdown' });
+  await ctx.reply(`🔧 Buscando *${codigo}*...`, { parse_mode: 'Markdown' });
 
   const resultado = await buscarNaPlanilha(codigo);
 
-  if (!resultado) {
-    await ctx.reply(`❌ Código *${codigo}* não encontrado.\n\nConfira se digitou certo ou se o código existe na planilha.`, { parse_mode: 'Markdown' });
-  } else if (resultado.startsWith('ERRO_PLANILHA')) {
-    await ctx.reply(`⚠️ Erro ao ler a planilha. Verifique se o link está público.\n${resultado}`);
+  if (resultado === 'ERRO_PLANILHA') {
+    await ctx.reply(`❌ Ainda não consegui ler a planilha.\n\nFaz isso: Na planilha vai em ARQUIVO > COMPARTILHAR > PUBLICAR NA WEB > Publicar como CSV`);
+  } else if (!resultado) {
+    await ctx.reply(`❌ Código *${codigo}* não encontrado na planilha.`, { parse_mode: 'Markdown' });
   } else {
     await ctx.reply(resultado, { parse_mode: 'Markdown' });
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'online', sheet: SHEET_ID }));
-app.get('/health', (req, res) => res.json({ ok: true }));
-
+app.get('/', (req, res) => res.json({ ok: true }));
 app.use(bot.webhookCallback('/telegram'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log('API na porta ' + PORT);
-  try {
-    const webhookUrl = `https://oraculo-api-7ozv.onrender.com/telegram`;
-    await bot.telegram.setWebhook(webhookUrl);
-    console.log('Webhook OK: ' + webhookUrl);
-  } catch (e) {
-    console.log('Erro webhook:', e.message);
-  }
+  console.log('Subindo...');
+  await bot.telegram.setWebhook(`https://oraculo-api-7ozv.onrender.com/telegram`);
+  console.log('Webhook OK');
 });
