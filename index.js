@@ -1,53 +1,49 @@
-async function lerPlanilhaCompleta() {
-  if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
+bot.on('text', async (ctx) => {
+  const textoOriginal = ctx.message.text.trim();
+  if (textoOriginal.startsWith('/')) return;
+  const id = ctx.from.id;
+  const texto = textoOriginal.toLowerCase();
+  const { cabecalho, dados } = await lerPlanilhaCompleta();
+  const filtroAtivo = esperandoFiltro[id];
+  let encontradas = [];
 
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
-  const { data } = await axios.get(url, { responseType: 'text' });
-
-  function parseCSV(text) {
-    const rows = []; let cur = '', row = [], inQuotes = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i]; const next = text[i+1];
-      if (c === '"') { if (inQuotes && next === '"') { cur += '"'; i++; } else inQuotes =!inQuotes; }
-      else if (c === ',' &&!inQuotes) { row.push(cur); cur = ''; }
-      else if ((c === '\n' || c === '\r') &&!inQuotes) {
-        if (cur || row.length) { row.push(cur); rows.push(row); row=[]; cur=''; }
-        if (c === '\r' && next === '\n') i++;
-      } else cur += c;
-    }
-    if (cur || row.length) { row.push(cur); rows.push(row); }
-    return rows;
+  if (filtroAtivo && cabecalho.includes(filtroAtivo)) {
+    encontradas = dados.filter(d => (d[filtroAtivo]||'').toLowerCase().includes(texto));
+    delete esperandoFiltro[id];
+  } else {
+    encontradas = dados.filter(d => d._textoBusca.includes(texto));
   }
 
-  const allRows = parseCSV(data).filter(r => r.join('').trim()!== '');
-  const cabecalho = allRows[0].map(h => h.replace(/"/g,'').trim().toUpperCase());
-  const idxEmissao = cabecalho.findIndex(h => h.includes('EMISS'));
-  const hoje = new Date(); hoje.setHours(0,0,0,0);
-
-  const dados = [];
-  for(let i=1; i < allRows.length; i++) {
-    const cols = allRows[i];
-    let obj = {};
-    cabecalho.forEach((h, idx) => obj[h] = (cols[idx] || '').replace(/^"|"$/g,'').trim());
-    if (Object.values(obj).join('').trim() === '') continue;
-
-    // --- CALCULO DE LEAD TIME CORRIGIDO ---
-    const emissaoStr = idxEmissao >=0? (cols[idxEmissao] || '') : (obj['EMISSÃO'] || '');
-    let lead = 0;
-    const m = emissaoStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-    if (m) {
-      let dia = parseInt(m[1]), mes = parseInt(m[2])-1, ano = parseInt(m[3]);
-      if (ano < 100) ano += 2000;
-      const dEmissao = new Date(ano, mes, dia); dEmissao.setHours(0,0,0,0);
-      if (!isNaN(dEmissao)) lead = Math.floor((hoje - dEmissao) / (1000*60*60*24));
-    }
-    obj._leadTime = lead;
-    obj._emissaoRaw = emissaoStr;
-    obj._textoBusca = Object.values(obj).join(' ').toLowerCase();
-    dados.push(obj);
+  if (encontradas.length === 0) {
+    await ctx.reply(`❌ Nenhuma OS para "${textoOriginal}" em ${filtroAtivo || 'GERAL'}`, {...menuFiltros});
+    return;
   }
-  console.log(`Lido: ${dados.length} OS | Coluna EMISSÃO = ${cabecalho[idxEmissao]}`);
-  const res = { cabecalho, dados };
-  cachePlanilha = { dados: res, hora: Date.now() };
-  return res;
-}
+
+  // 1 OS = FICHA COMPLETA
+  if (encontradas.length === 1) {
+    const os = encontradas[0];
+    let r = `🔍 *FICHA COMPLETA OS ${os['OS']}*\n━━━━━━━━━━━━━━━\n`;
+    cabecalho.forEach(col => {
+      if(col.startsWith('_')) return;
+      r += `*${col}:* ${os[col] || '-'}\n`;
+    });
+    r += `*LEAD TIME:* ${os._leadTime} dias (${os._emissaoRaw})\n`;
+    await ctx.reply(r.substring(0,4000), { parse_mode: 'Markdown',...menuFiltros });
+    if (r.length > 4000) await ctx.reply(r.substring(4000), { parse_mode: 'Markdown' });
+    return;
+  }
+
+  // VÁRIAS OS = LISTA TODAS (SEM CORTAR EM 5)
+  await ctx.reply(`✅ *${encontradas.length} OS ENCONTRADAS EM ${filtroAtivo || 'GERAL'} para "${textoOriginal}":*`, { parse_mode: 'Markdown' });
+
+  // Manda de 10 em 10 pra não travar o Telegram
+  for (let i = 0; i < encontradas.length; i += 10) {
+    const lote = encontradas.slice(i, i+10);
+    let msg = '';
+    lote.forEach((os, idx) => {
+      msg += `${i+idx+1}. *OS ${os['OS']}* | COD ${os['CODIGO']} | ${os['SETOR']} | ${os['FAMILIA']} | LEAD ${os._leadTime}d | ${os['STATUS']}\n`;
+    });
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  }
+  await ctx.reply(`Fim da lista: ${encontradas.length} OS no total.`, menuFiltros);
+});
