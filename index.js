@@ -5,9 +5,8 @@ const express = require('express');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
 const PORT = process.env.PORT || 3000;
-
 if (!BOT_TOKEN) {
-  console.error('BOT_TOKEN não definido!');
+  console.error('Falta BOT_TOKEN');
   process.exit(1);
 }
 
@@ -19,14 +18,14 @@ let cachePlanilha = { dados: null, hora: 0 };
 let esperandoFiltro = {};
 
 async function parseCSV(text) {
-  const rows = []; let cur = '', row = [], inQuotes = false;
+  const rows = []; let cur = '', row = [], inQ = false;
   for (let i = 0; i < text.length; i++) {
-    const c = text[i]; const next = text[i+1];
-    if (c === '"') { if (inQuotes && next === '"') { cur += '"'; i++; } else inQuotes =!inQuotes; }
-    else if (c === ',' &&!inQuotes) { row.push(cur); cur = ''; }
-    else if ((c === '\n' || c === '\r') &&!inQuotes) {
+    const c = text[i]; const n = text[i+1];
+    if (c === '"') { if (inQ && n === '"') { cur += '"'; i++; } else inQ =!inQ; }
+    else if (c === ',' &&!inQ) { row.push(cur); cur = ''; }
+    else if ((c === '\n' || c === '\r') &&!inQ) {
       if (cur || row.length) { row.push(cur); rows.push(row); row=[]; cur=''; }
-      if (c === '\r' && next === '\n') i++;
+      if (c === '\r' && n === '\n') i++;
     } else cur += c;
   }
   if (cur || row.length) { row.push(cur); rows.push(row); }
@@ -35,125 +34,62 @@ async function parseCSV(text) {
 
 async function lerPlanilhaCompleta() {
   if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
-  let allDataRows = []; let cabecalho = null; let offset = 0;
+  let allRows = []; let cab = null; let offset = 0;
   while (true) {
-    const tq = 'SELECT * LIMIT 1000 OFFSET ' + offset;
-    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent(tq);
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&tq=${encodeURIComponent('SELECT * LIMIT 1000 OFFSET '+offset)}`;
     try {
       const r = await axios.get(url, { responseType: 'text', timeout: 15000 });
       const rows = await parseCSV(r.data);
-      if (rows.length === 0) break;
-      if (!cabecalho) { cabecalho = rows[0].map(h=>h.replace(/"/g,'').trim().toUpperCase()); allDataRows.push(...rows.slice(1)); }
-      else { const isHeader = rows[0].join(',').toUpperCase().includes('OS'); allDataRows.push(...(isHeader? rows.slice(1) : rows)); }
+      if (!rows.length) break;
+      if (!cab) { cab = rows[0].map(h=>h.replace(/"/g,'').trim()); allRows.push(...rows.slice(1)); }
+      else allRows.push(...rows);
       if (rows.length < 1000) break;
       offset += 1000; if (offset > 15000) break;
-    } catch (e) { console.error('Erro planilha:', e.message); break; }
+    } catch(e) { break; }
   }
-  const idxEmissao = cabecalho? cabecalho.findIndex(h=>h.includes('EMISS')) : -1;
-  const idxLead = cabecalho? cabecalho.findIndex(h=>h.includes('LEAD')) : -1;
+  const upper = cab.map(h=>h.toUpperCase());
+  const idxOS = upper.findIndex(h=>h==='OS');
+  const idxSetor = upper.findIndex(h=>h.includes('SETOR'));
+  const idxFamilia = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
+  const idxQtd = upper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
+  const idxLead = upper.findIndex(h=>h.includes('LEAD'));
+  const idxStatus = upper.findIndex(h=>h.includes('STATUS'));
 
-  const dados = allDataRows.map(cols=>{
-    let obj = {}; cabecalho.forEach((h, idx)=>{ obj[h]=(cols[idx]||'').replace(/^"|"$/g,'').trim(); });
-    const emissaoStr = idxEmissao>=0? (cols[idxEmissao]||'') : '';
-    let lead = 0;
-    if(idxLead>=0){
-      const rawLead = (cols[idxLead]||'').replace(/^"|"$/g,'').trim();
-      const num = parseInt(String(rawLead).replace(/[^0-9\-]/g,''));
-      if(!isNaN(num)) lead=num;
-    }
-    obj._leadTime=lead; obj._emissaoRaw=emissaoStr; obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
-    return obj;
-  }).filter(o=>o['OS']);
+  const dados = allRows.map(cols=>{
+    let o={}; cab.forEach((h,i)=>o[h]=(cols[i]||'').replace(/^"|"$/g,'').trim());
+    o._os = o[cab[idxOS]]||'';
+    o._setor = idxSetor>=0? (o[cab[idxSetor]]||'SEM SETOR') : 'SEM SETOR';
+    o._familia = idxFamilia>=0? (o[cab[idxFamilia]]||'SEM FAMILIA') : 'SEM FAMILIA';
+    o._status = idxStatus>=0? (o[cab[idxStatus]]||'') : '';
+    o._qtd = idxQtd>=0? (parseFloat(String(o[cab[idxQtd]]||'0').replace(',','.'))||0) : 0;
+    o._lead = idxLead>=0? (parseInt(o[cab[idxLead]])||0) : 0;
+    o._busca = Object.values(o).join(' ').toLowerCase();
+    return o;
+  }).filter(o=>o._os);
 
-  const res={cabecalho,dados}; cachePlanilha={dados:res,hora:Date.now()};
-  console.log('TOTAL LIDO: '+dados.length+' OS | LEAD da planilha');
-  return res;
+  const ret = { cabecalho: cab, dados };
+  cachePlanilha = { dados: ret, hora: Date.now() };
+  console.log(`LIDO: ${dados.length} linhas materiais | ${new Set(dados.map(d=>d._os)).size} OS unicas`);
+  return ret;
 }
 
-// MENU SEM DASHBOARD
-const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas']]).resize();
+const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
 
-bot.start((ctx) => ctx.reply('Bot de Ordens - Online', menu));
-bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
-bot.command('resumo', async (ctx) => {
-  try {
-    const { dados } = await lerPlanilhaCompleta();
-    let txt = 'RESUMO GERAL: ' + dados.length + ' OS\n';
-    const porSetor = {}; dados.forEach(d=>{ const s=d['SETOR']||'SEM SETOR'; porSetor[s]=(porSetor[s]||0)+1; });
-    Object.entries(porSetor).forEach(([k,v])=> txt+= k+': '+v+'\n');
-    return ctx.reply(txt.substring(0,4096), menu);
-  } catch(e){ return ctx.reply('Erro no resumo', menu); }
+bot.start(ctx=>ctx.reply('Bot ZROF Oráculo - Online', menu));
+bot.command('limpar', ctx=>{ cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
+bot.command('dashboard', ctx=>{
+  const dom = process.env.RENDER_EXTERNAL_HOSTNAME;
+  const url = dom? `https://${dom}/dashboard` : '/dashboard';
+  return ctx.reply(`Dashboard: ${url}`, menu);
 });
-
-bot.command('alertas', async (ctx) => {
-  try {
-    const { dados } = await lerPlanilhaCompleta();
-    const imediatas = dados.filter(d=>d._leadTime >= 180).sort((a,b)=>b._leadTime - a._leadTime);
-    const urgentes = dados.filter(d=>d._leadTime >= 150 && d._leadTime < 180).sort((a,b)=>b._leadTime - a._leadTime);
-    const prioritarias = dados.filter(d=>d._leadTime >= 120 && d._leadTime < 150).sort((a,b)=>b._leadTime - a._leadTime);
-    const total = imediatas.length + urgentes.length + prioritarias.length;
-    if (total === 0) return ctx.reply('Nenhuma OS com mais de 120 dias!', menu);
-    let txt = 'ALERTAS LEAD > 120 DIAS (da planilha): ' + total + ' OS\n';
-    if (imediatas.length) { txt+= '\nIMEDIATA (>=180d): '+imediatas.length+' OS\n'; imediatas.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
-    if (urgentes.length) { txt+= '\nURGENTE (150-179d): '+urgentes.length+' OS\n'; urgentes.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
-    if (prioritarias.length) { txt+= '\nPRIORITARIO (120-149d): '+prioritarias.length+' OS\n'; prioritarias.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
-    return ctx.reply(txt.substring(0,4096), menu);
-  } catch(e){ return ctx.reply('Erro nos alertas', menu); }
+bot.command('resumo', async ctx=>{
+  const { dados } = await lerPlanilhaCompleta();
+  const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
+  let txt=`RESUMO: ${unicas.length} OS únicas / ${dados.length} linhas materiais\n`;
+  const porSetor={}; unicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
+  Object.entries(porSetor).forEach(([k,v])=> txt+=`${k}: ${v}\n`);
+  return ctx.reply(txt.slice(0,4096), menu);
 });
-
-bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], (ctx) => {
-  const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
-  esperandoFiltro[ctx.from.id]=mapa[ctx.message.text];
-  return ctx.reply('Digite o valor para '+ctx.message.text+':');
-});
-
-bot.on('text', async (ctx) => {
-  try {
-    const textoOriginal = ctx.message.text.trim(); if (textoOriginal.startsWith('/')) return;
-    if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(textoOriginal)) return;
-    const id = ctx.from.id; const texto = textoOriginal.toLowerCase();
-    const { cabecalho, dados } = await lerPlanilhaCompleta();
-    const filtroAtivo = esperandoFiltro[id];
-    let encontradas = filtroAtivo? dados.filter(d=>(d[filtroAtivo]||'').toLowerCase().includes(texto)) : dados.filter(d=>d._textoBusca.includes(texto));
-    delete esperandoFiltro[id];
-    if (encontradas.length===0) return ctx.reply('Nada para "'+textoOriginal+'"', menu);
-    if (encontradas.length===1) {
-      const os = encontradas[0]; let r = 'FICHA OS '+os['OS']+'\n';
-      cabecalho.forEach(col=>{ if(!col.startsWith('_')) r+= col+': '+(os[col]||'-')+'\n'; });
-      return ctx.reply(r.substring(0,4096), menu);
-    }
-    await ctx.reply(encontradas.length+' OS encontradas:');
-    for (let i=0; i<encontradas.length; i+=10) {
-      const lote = encontradas.slice(i,i+10); let msg='';
-      lote.forEach(o=>{ msg+= 'OS '+o['OS']+' | COD '+o['CODIGO']+' | '+o._emissaoRaw+' | '+o['SETOR']+' | LEAD '+o._leadTime+'d\n'; });
-      await ctx.reply(msg);
-    }
-    return ctx.reply('Total: '+encontradas.length+' OS', menu);
-  } catch(e){
-    console.error(e);
-    return ctx.reply('Erro na busca', menu);
-  }
-});
-
-app.get('/', (req,res)=>res.send('Bot ZROF online - webhook ativo'));
-app.use(bot.webhookCallback('/telegram'));
-
-app.listen(PORT, async () => {
-  console.log('Web ok na porta '+PORT);
-  const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  if (domain) {
-    const webhookUrl = 'https://'+domain+'/telegram';
-    try {
-      await bot.telegram.setWebhook(webhookUrl);
-      console.log('Webhook setado: '+webhookUrl);
-    } catch (e) {
-      console.error('Erro webhook:', e.message);
-    }
-  } else {
-    console.log('Polling local');
-    bot.launch().then(()=>console.log('Bot polling ok'));
-  }
-});
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.command('alertas', async ctx=>{
+  const { dados } = await lerPlanilhaCompleta();
+  const
