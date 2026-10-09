@@ -11,6 +11,68 @@ if (!BOT_TOKEN) process.exit(1);
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 let cache = { dados: null, hora: 0 };
+let cacheMat = { dados: null, hora: 0 };
+let estadoUsuario = {}; // para saber quem clicou em Buscar Material
+
+async function getCSVSheet(gid){
+  const urls = [
+    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${gid}`,
+    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${gid}`
+  ];
+  for(let u of urls){
+    try{
+      const r = await axios.get(u, { responseType:'text', timeout:15000 });
+      if(r.data && r.data.length>100 &&!r.data.includes('<html')) return r.data;
+    }catch(e){}
+  }
+  return null;
+}
+
+async function lerMateriais(){
+  if(cacheMat.dados && Date.now() - cacheMat.hora < 2*60*1000) return cacheMat.dados;
+  // Tenta achar a aba BD_MAT - tenta gids comuns
+  const gids = ['1','1957311427','1132978923','2','3','0'];
+  let csv = null, gidUsado = null;
+  for(let gid of gids){
+    csv = await getCSVSheet(gid);
+    if(csv && (csv.toUpperCase().includes('MATERIAL') || csv.toUpperCase().includes('QTD'))){
+      if(gid!=='0'){ gidUsado=gid; break; }
+    }
+  }
+  if(!csv){ console.log('BD_MAT nao achada'); return { porOS:{}, total:0 }; }
+  console.log('BD_MAT achada gid='+gidUsado);
+
+  const linhas = csv.split(/\r?\n/).filter(l=>l.trim());
+  const porOS = {};
+  let total = 0;
+  for(let i=1;i<linhas.length;i++){
+    const linha = linhas[i]; if(!linha.trim()) continue;
+    const cols=[]; let cur='',inQ=false;
+    for(let j=0;j<linha.length;j++){
+      const c=linha[j];
+      if(c==='"'){ if(linha[j+1]==='"'){ cur+='"'; j++; } else inQ=!inQ; }
+      else if(c===',' &&!inQ){ cols.push(cur); cur=''; }
+      else cur+=c;
+    }
+    cols.push(cur);
+    const clean = cols.map(s=>s.replace(/^"|"$/g,'').trim());
+    const os = (clean[0]||'').replace(/\D/g,''); if(!os) continue;
+    const txtOrdem = clean[1]||'';
+    const item = clean[2]||'';
+    const material = clean[3]||'';
+    const txtMat = clean[4]||'';
+    const qtdNec = clean[5]||'';
+    const qtdRet = clean[6]||'';
+    const po = clean[7]||'';
+    // Considera pendente se qtdRet for 0 ou vazio - mas lista todos pra busca
+    if(!porOS[os]) porOS[os]=[];
+    porOS[os].push({ item, material, txtMat, qtdNec, qtdRet, po, txtOrdem });
+    total++;
+  }
+  const res = { porOS, total };
+  cacheMat = { dados: res, hora: Date.now() };
+  return res;
+}
 
 async function lerPlanilha() {
   if (cache.dados && Date.now() - cache.hora < 2*60*1000) return cache.dados;
@@ -27,8 +89,8 @@ async function lerPlanilha() {
     let idxGrupo = cabUpper.findIndex(h=>h==='GRUPO' || h.includes('GRUPO'));
 
     const mapaOrdens = {};
-    const mapaMina = {}; // OS que tem grupo M
-    const mapaUsina = {}; // OS que tem grupo U
+    const mapaMina = {};
+    const mapaUsina = {};
     const dadosFull = [];
 
     for (let i=1;i<linhas.length;i++){
@@ -68,7 +130,6 @@ async function lerPlanilha() {
     const porSetor = {}; Object.values(mapaOrdens).forEach(d=>{ porSetor[d.setor]=(porSetor[d.setor]||0)+1; });
     const porFamilia = {}; Object.values(mapaOrdens).forEach(d=>{ porFamilia[d.familia]=(porFamilia[d.familia]||0)+1; });
 
-    // SEPARADOS POR MACRO
     const porSetorMina = {}; Object.values(mapaMina).forEach(d=>{ porSetorMina[d.setor]=(porSetorMina[d.setor]||0)+1; });
     const porSetorUsina = {}; Object.values(mapaUsina).forEach(d=>{ porSetorUsina[d.setor]=(porSetorUsina[d.setor]||0)+1; });
     const porFamiliaMina = {}; Object.values(mapaMina).forEach(d=>{ porFamiliaMina[d.familia]=(porFamiliaMina[d.familia]||0)+1; });
@@ -86,12 +147,22 @@ async function lerPlanilha() {
 }
 
 lerPlanilha();
-const menu = Markup.keyboard([['🔍 Buscar OS','📊 Resumo'],['📈 Dashboard','♻️ Limpar']]).resize();
+lerMateriais();
+
+// MENU ATUALIZADO COM NOVO BOTAO
+const menu = Markup.keyboard([['🔍 Buscar OS','🧩 Materiais OS'],['📊 Resumo','📈 Dashboard'],['♻️ Limpar']]).resize();
+
 bot.start((ctx)=>ctx.reply('🤖 Bot ZROF - Macro Mina/Usina Online!', menu));
 bot.hears('📊 Resumo', async (ctx)=>{ ctx.message.text='/resumo'; return bot.handleUpdate({message: ctx.message}); });
 bot.hears('📈 Dashboard', async (ctx)=>{ const domain=process.env.RENDER_EXTERNAL_HOSTNAME; const url=domain? 'https://'+domain+'/dashboard':'/dashboard'; return ctx.reply('📈 Dashboard: '+url, menu); });
-bot.hears('♻️ Limpar', async (ctx)=>{ cache={dados:null,hora:0}; await ctx.reply('♻️ Recarregando...', menu); const d=await lerPlanilha(); return ctx.reply(`Pronto! Mina:${d.totalMina} Usina:${d.totalUsina} Total:${d.totalOrdens}`, menu); });
+bot.hears('♻️ Limpar', async (ctx)=>{ cache={dados:null,hora:0}; cacheMat={dados:null,hora:0}; await ctx.reply('♻️ Recarregando...', menu); const d=await lerPlanilha(); const m=await lerMateriais(); return ctx.reply(`Pronto! Ordens:${d.totalOrdens} | Materiais:${m.total}`, menu); });
 bot.hears('🔍 Buscar OS', (ctx)=>ctx.reply('Digite a OS:', menu));
+
+// NOVO BOTAO - BUSCA DE MATERIAL
+bot.hears('🧩 Materiais OS', (ctx)=>{
+  estadoUsuario[ctx.from.id] = 'AGUARDANDO_OS_MATERIAL';
+  return ctx.reply('🧩 Digite o número da OS para listar os materiais referentes a ela (ex: 25307053):', menu);
+});
 
 bot.command('resumo', async (ctx)=>{
   const d = await lerPlanilha();
@@ -99,46 +170,72 @@ bot.command('resumo', async (ctx)=>{
   txt += `Total de Ordens: ${d.totalOrdens}\n`;
   txt += `⛏️ Macro MINA (M): ${d.totalMina}\n`;
   txt += `🏭 Macro USINA (U): ${d.totalUsina}\n\n`;
-
   txt += `📍 SETOR - GERAL:\n`;
   Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
   txt += `\n⛏️ SETOR - MINA:\n`;
   Object.entries(d.porSetorMina).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
   txt += `\n🏭 SETOR - USINA:\n`;
   Object.entries(d.porSetorUsina).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
-  txt += `\n👨‍👩‍👧‍👦 FAMILIA - GERAL:\n`;
-  Object.entries(d.porFamilia).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
-  txt += `\n⛏️ FAMILIA - MINA:\n`;
-  Object.entries(d.porFamiliaMina).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
-  txt += `\n🏭 FAMILIA - USINA:\n`;
-  Object.entries(d.porFamiliaUsina).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
-
-  // Divide em mensagens de 4000
   for (let i=0;i<txt.length;i+=4000){ await ctx.reply(txt.substring(i,i+4000), menu); }
 });
 
-bot.command('dashboard', (ctx)=>{ const domain=process.env.RENDER_EXTERNAL_HOSTNAME; const url=domain? 'https://'+domain+'/dashboard':'/dashboard'; return ctx.reply('📈 Dashboard: '+url, menu); });
-bot.command('limpar', async (ctx)=>{ cache={dados:null,hora:0}; const d=await lerPlanilha(); return ctx.reply(`Pronto! Total:${d.totalOrdens} Mina:${d.totalMina} Usina:${d.totalUsina}`, menu); });
-
 bot.on('text', async (ctx)=>{
   const texto = ctx.message.text.trim();
-  if (texto.startsWith('/') || ['🔍 Buscar OS','📊 Resumo','📈 Dashboard','♻️ Limpar'].includes(texto)) return;
+  if (texto.startsWith('/') || ['🔍 Buscar OS','🧩 Materiais OS','📊 Resumo','📈 Dashboard','♻️ Limpar'].includes(texto)) return;
+
+  const userId = ctx.from.id;
+  const modo = estadoUsuario[userId];
+
+  // SE ESTIVER NO MODO BUSCA DE MATERIAL
+  if(modo === 'AGUARDANDO_OS_MATERIAL'){
+    estadoUsuario[userId] = null;
+    const osBusca = texto.replace(/\D/g,'');
+    const mats = await lerMateriais();
+    const lista = mats.porOS[osBusca];
+    if(!lista ||!lista.length){
+      return ctx.reply(`❌ Nenhum material encontrado para OS ${osBusca}\nTotal de materiais na planilha: ${mats.total}`, menu);
+    }
+    let txt = `🧩 MATERIAIS - OS ${osBusca} (${lista.length} itens)\n\n`;
+    lista.forEach((m,i)=>{
+      const pend = (m.qtdRet==='0' || m.qtdRet==='0,000' || m.qtdRet==='' || parseFloat(m.qtdRet.replace(',','.'))===0)? '⚠️ PENDENTE' : '✅';
+      txt += `${i+1}) ${pend}\nItem: ${m.item} | Mat: ${m.material}\n${m.txtMat}\nNec: ${m.qtdNec} | Ret: ${m.qtdRet} | PO: ${m.po}\n\n`;
+    });
+    for (let i=0;i<txt.length;i+=4000){ await ctx.reply(txt.substring(i,i+4000), menu); }
+    return;
+  }
+
+  // BUSCA NORMAL DE OS (como antes)
   try {
     const busca = texto.toLowerCase(); const { dadosFull } = await lerPlanilha();
     const achadas = dadosFull.filter(d=>d._busca.includes(busca));
     if (!achadas.length) return ctx.reply(`❌ Nada para "${texto}"`, menu);
-    for (const item of achadas.slice(0,5)){
+    for (const item of achadas.slice(0,3)){
       let detalhe = `📋 OS: ${item._os} | Macro: ${item._macro}\n--------------------------\n`;
       for (const [col, val] of Object.entries(item._row)){ if (val && val.trim()) detalhe += `${col}: ${val}\n`; }
-      await ctx.reply(detalhe.substring(0,4000), menu);
+      const mats = await lerMateriais();
+      const qtdMat = mats.porOS[item._os]?.length || 0;
+      if(qtdMat>0){
+        detalhe += `\n🧩 ${qtdMat} materiais vinculados. Clique para ver.`;
+        await ctx.reply(detalhe.substring(0,4000), Markup.inlineKeyboard([[Markup.button.callback(`Ver ${qtdMat} materiais`,`mat:${item._os}`)]]));
+      } else {
+        await ctx.reply(detalhe.substring(0,4000), menu);
+      }
     }
-    if (achadas.length>5) await ctx.reply(`Total: ${achadas.length} materiais (mostrando 5)`, menu);
-  } catch(e){}
+  } catch(e){ console.log(e.message); }
+});
+
+bot.action(/mat:(.+)/, async (ctx)=>{
+  await ctx.answerCbQuery();
+  const os = ctx.match[1];
+  const mats = await lerMateriais();
+  const lista = mats.porOS[os];
+  if(!lista) return ctx.reply(`Sem materiais para ${os}`, menu);
+  let txt = `🧩 MATERIAIS - OS ${os} (${lista.length})\n\n`;
+  lista.forEach((m,i)=>{
+    const pend = (m.qtdRet==='0' || m.qtdRet==='0,000' || m.qtdRet==='' )? '⚠️ PEND' : '✅';
+    txt += `${i+1}) ${pend} Mat:${m.material} ${m.txtMat} Nec:${m.qtdNec} Ret:${m.qtdRet} PO:${m.po}\n\n`;
+  });
+  for (let i=0;i<txt.length;i+=4000){ await ctx.reply(txt.substring(i,i+4000), menu); }
 });
 
 app.get('/', (req,res)=>res.send('OK <a href="/dashboard">Dashboard</a>'));
@@ -167,11 +264,8 @@ const dashHtml = `<!DOCTYPE html>
 async function load(){
   const d = await fetch('/api/resumo').then(r=>r.json());
   document.getElementById('titulo').innerText = 'ZROF - Total:'+d.totalOrdens+' | Mina:'+d.totalMina+' | Usina:'+d.totalUsina;
-
   const sortEntries = (obj)=>Object.entries(obj).sort((a,b)=>b[1]-a[1]);
-
   new Chart(document.getElementById('cMacro'), {type:'doughnut', data:{labels:Object.keys(d.porMacro), datasets:[{data:Object.values(d.porMacro), backgroundColor:['#38bdf8','#fbbf24']}]}, options:{responsive:true, plugins:{legend:{labels:{color:'#fff'}}}}});
-
   const makeBar = (id, obj, color)=>{
     const e = sortEntries(obj);
     new Chart(document.getElementById(id), {type:'bar', data:{labels:e.map(x=>x[0]), datasets:[{label:'Ordens', data:e.map(x=>x[1]), backgroundColor:color}]}, options:{responsive:true, plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#fff', maxRotation:45}}, y:{ticks:{color:'#fff'}}}}});
