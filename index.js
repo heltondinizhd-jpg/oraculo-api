@@ -1,17 +1,106 @@
+const express = require('express');
+const axios = require('axios');
+let Telegraf, Markup;
+try{ const t=require('telegraf'); Telegraf=t.Telegraf; Markup=t.Markup; }catch(e){}
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const SHEET_ID = process.env.SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_PATH = '/telegraf/'+BOT_TOKEN;
+
+const app = express();
+app.use(express.json());
+let cache={dados:null,hora:0};
+let cacheMat={dados:null,hora:0};
+let estado={};
+
+async function lerMateriais(){
+  if(cacheMat.dados && Date.now()-cacheMat.hora<120000) return cacheMat.dados;
+  const urls=[
+    'https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/gviz/tq?tqx=out:csv&sheet=BD_MAT',
+    'https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/export?format=csv&gid=1'
+  ];
+  for(let url of urls){
+    try{
+      const r=await axios.get(url,{responseType:'text',timeout:15000});
+      if(r.data.includes('<html')) continue;
+      const cab=r.data.split('\n')[0].toUpperCase();
+      if(cab.includes('SETOR') && cab.includes('GRUPO')) continue;
+      if(cab.includes('MATERIAL')||cab.includes('QTD')){
+        const linhas=r.data.split(/\r?\n/).filter(l=>l.trim());
+        const porOS={}, porOSPend={}; let total=0, totalPend=0;
+        for(let i=1;i<linhas.length;i++){
+          let line=linhas[i], cols=[], cur='', inQ=false;
+          for(let j=0;j<line.length;j++){ let c=line[j]; if(c=='"'){ if(line[j+1]=='"'){cur+='"';j++;} else inQ=!inQ;} else if(c==','&&!inQ){cols.push(cur);cur='';} else cur+=c; }
+          cols.push(cur);
+          const cl=cols.map(s=>s.replace(/^"|"$/g,'').trim());
+          const os=(cl[0]||'').replace(/\D/g,''); if(!os) continue;
+          const isPend =!cl[6] || cl[6]==='0' || cl[6]==='0,000' || cl[6]==='0,00' || parseFloat(cl[6].replace(',','.'))===0;
+          if(!porOS[os]) porOS[os]=[];
+          porOS[os].push({material:cl[3],txt:cl[4],nec:cl[5],ret:cl[6],po:cl[7]});
+          if(isPend){ if(!porOSPend[os]) porOSPend[os]=[]; porOSPend[os].push({material:cl[3],txt:cl[4],nec:cl[5],ret:cl[6],po:cl[7]}); totalPend++; }
+          total++;
+        }
+        const res={porOS,porOSPend,total,totalPend};
+        cacheMat={dados:res,hora:Date.now()}; return res;
+      }
+    }catch(e){}
+  }
+  return {porOS:{},porOSPend:{},total:0,totalPend:0};
+}
+
+async function lerPlanilha(){
+  if(cache.dados && Date.now()-cache.hora<120000) return cache.dados;
+  try{
+    const r=await axios.get('https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/gviz/tq?tqx=out:csv',{responseType:'text',timeout:20000});
+    const linhas=r.data.split(/\r?\n/).filter(l=>l.trim());
+    const cabOriginal=linhas[0].split(',').map(s=>s.replace(/^"|"$/g,'').trim());
+    const cabU=cabOriginal.map(h=>h.toUpperCase());
+    let idxOS=cabU.indexOf('OS'); if(idxOS<0) idxOS=cabU.findIndex(h=>h.includes('ORDEM'));
+    let idxSetor=cabU.findIndex(h=>h.includes('SETOR'));
+    let idxFam=cabU.findIndex(h=>h.includes('FAMILIA'));
+    let idxGrupo=cabU.findIndex(h=>h.includes('GRUPO'));
+    const mapaOrdens={}, mapaMina={}, mapaUsina={}, porSetor={}, porSetorMina={}, porSetorUsina={}, porFamilia={}, dadosFull=[];
+    for(let i=1;i<linhas.length;i++){
+      let line=linhas[i], cols=[], cur='', inQ=false;
+      for(let j=0;j<line.length;j++){ let c=line[j]; if(c=='"'){ if(line[j+1]=='"'){cur+='"';j++;} else inQ=!inQ;} else if(c==','&&!inQ){cols.push(cur);cur='';} else cur+=c; }
+      cols.push(cur);
+      const get=(idx)=> idx>=0?(cols[idx]||'').replace(/^"|"$/g,'').trim():'';
+      const os=get(idxOS).replace(/\D/g,''); if(!os) continue;
+      const setor=(get(idxSetor)||'SEM').toUpperCase(); const fam=(get(idxFam)||'SEM').toUpperCase(); const grupo=(get(idxGrupo)||'').toUpperCase();
+      let macro='OUTROS'; if(grupo.startsWith('M')) macro='MINA'; else if(grupo.startsWith('U')) macro='USINA';
+      const row={}; cabOriginal.forEach((n,idx)=>{row[n]=get(idx);}); row['_MACRO']=macro;
+      dadosFull.push({_os:os,_setor:setor,_familia:fam,_macro:macro,_row:row,_busca:line.toLowerCase()});
+      if(!mapaOrdens[os]){ mapaOrdens[os]=1; porSetor[setor]=(porSetor[setor]||0)+1; porFamilia[fam]=(porFamilia[fam]||0)+1; }
+      if(macro==='MINA' &&!mapaMina[os]){ mapaMina[os]=1; porSetorMina[setor]=(porSetorMina[setor]||0)+1; }
+      if(macro==='USINA' &&!mapaUsina[os]){ mapaUsina[os]=1; porSetorUsina[setor]=(porSetorUsina[setor]||0)+1; }
+    }
+    const result={totalOrdens:Object.keys(mapaOrdens).length,totalMina:Object.keys(mapaMina).length,totalUsina:Object.keys(mapaUsina).length,porMacro:{MINA:Object.keys(mapaMina).length,USINA:Object.keys(mapaUsina).length},porSetor, porSetorMina, porSetorUsina, porFamilia, dadosFull};
+    cache={dados:result,hora:Date.now()}; return result;
+  }catch(e){ return cache.dados; }
+}
+
+let bot=null;
+if(BOT_TOKEN && Telegraf){
+  bot=new Telegraf(BOT_TOKEN);
+  app.use(bot.webhookCallback(WEBHOOK_PATH));
+}
+
+app.get('/',(req,res)=>res.send('OK V13 FIX GRAFICOS '+new Date().toISOString()+' <a href="/dashboard">Dashboard</a>'));
+app.get('/ping',(req,res)=>res.send('pong '+Date.now()));
+app.get('/api/resumo', async (req,res)=>{
+  try{
+    const d=await lerPlanilha(); const m=await lerMateriais();
+    res.json({d:{totalOrdens:d.totalOrdens,totalMina:d.totalMina,totalUsina:d.totalUsina,porMacro:d.porMacro,porSetor:d.porSetor,porSetorMina:d.porSetorMina,porSetorUsina:d.porSetorUsina,porFamilia:d.porFamilia},m:{total:m.total,totalPend:m.totalPend}});
+  }catch(e){ res.json({d:{totalOrdens:0,totalMina:0,totalUsina:0,porMacro:{MINA:0,USINA:0},porSetor:{}},m:{total:0,totalPend:0}}); }
+});
+
 app.get('/dashboard', async (req,res)=>{
   res.send(`
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}
-.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
-.big{font-size:26px;font-weight:800}
-.label{opacity:.7;font-size:12px}
-@media(max-width:800px){.grid,.kpis{grid-template-columns:1fr}}
-</style></head><body>
-<h2>ZROF Dashboard V13 - FIX GRAFICO</h2>
+<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}.big{font-size:26px;font-weight:800}.label{opacity:.7;font-size:12px}@media(max-width:800px){.grid,.kpis{grid-template-columns:1fr}}</style></head><body>
+<h2>ZROF Dashboard V13 - GRAFICOS FIX</h2>
 <div class="kpis">
 <div class="card"><div class="label">Total de ordens</div><div class="big" id="tOrd">...</div></div>
 <div class="card"><div class="label">Ordens Mina</div><div class="big" id="tMina">...</div></div>
@@ -29,46 +118,51 @@ body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}
 <div class="card"><h3>Familia Top</h3><canvas id="cFam"></canvas></div>
 <script>
 async function load(){
-  const r = await fetch('/api/resumo'); 
+  const r = await fetch('/api/resumo');
   const j = await r.json();
-  const d = j.d || j; 
-  const m = j.m || {total:0,totalPend:0};
-  // Se vier no formato antigo {d,m} usa, se vier direto usa d
-  const dd = d.dados ? d.dados : d;
-  const mm = m;
-  const porMacro = dd.porMacro || d.porMacro || {};
-  const porSetor = dd.porSetor || d.porSetor || {};
-  const porSetorMina = dd.porSetorMina || d.porSetorMina || {};
-  const porSetorUsina = dd.porSetorUsina || d.porSetorUsina || {};
-  const porFamilia = dd.porFamilia || d.porFamilia || {};
-  
-  document.getElementById('tOrd').innerText = dd.totalOrdens || d.totalOrdens || 0;
-  document.getElementById('tMina').innerText = dd.totalMina || d.totalMina || 0;
-  document.getElementById('tUsina').innerText = dd.totalUsina || d.totalUsina || 0;
-  document.getElementById('tPend').innerText = (mm.totalPend||0) + '/' + (mm.total||0);
-
+  const d = j.d; const m = j.m;
+  document.getElementById('tOrd').innerText = d.totalOrdens;
+  document.getElementById('tMina').innerText = d.totalMina;
+  document.getElementById('tUsina').innerText = d.totalUsina;
+  document.getElementById('tPend').innerText = m.totalPend + '/' + m.total;
   function sortE(o){return Object.entries(o||{}).sort((a,b)=>b[1]-a[1]);}
-  
-  new Chart(document.getElementById('cMacro'),{
-    type:'doughnut',
-    data:{labels:Object.keys(porMacro),datasets:[{data:Object.values(porMacro),backgroundColor:['#38bdf8','#fbbf24']}]}
-  });
-  
-  function makeBar(id,obj,color){
-    const e=sortE(obj).slice(0,12);
-    new Chart(document.getElementById(id),{
-      type:'bar',
-      data:{labels:e.map(x=>x[0]),datasets:[{data:e.map(x=>x[1]),backgroundColor:color}]},
-      options:{indexAxis:'y',plugins:{legend:{display:false}}}
-    });
-  }
-  makeBar('cSetor',porSetor,'#a78bfa');
-  makeBar('cSetorMina',porSetorMina,'#38bdf8');
-  makeBar('cSetorUsina',porSetorUsina,'#fbbf24');
-  makeBar('cFam',porFamilia,'#34d399');
+  new Chart(document.getElementById('cMacro'),{type:'doughnut',data:{labels:Object.keys(d.porMacro),[STRIPPED]
+  function makeBar(id,obj,color){const e=sortE(obj).slice(0,12); new Chart(document.getElementById(id),{type:'bar',data:{labels:e.map(x=>x[0]),[STRIPPED]
+  makeBar('cSetor',d.porSetor,'#a78bfa');
+  makeBar('cSetorMina',d.porSetorMina,'#38bdf8');
+  makeBar('cSetorUsina',d.porSetorUsina,'#fbbf24');
+  makeBar('cFam',d.porFamilia,'#34d399');
 }
 load();
 </script>
 </body></html>
 `);
 });
+
+app.listen(PORT, function(){
+  console.log('WEB ON '+PORT);
+  if(bot){
+    const domain=process.env.RENDER_EXTERNAL_HOSTNAME;
+    if(domain){
+      const webhookUrl='https://'+domain+WEBHOOK_PATH;
+      bot.telegram.setWebhook(webhookUrl).then(()=>console.log('WEBHOOK SET '+webhookUrl)).catch(e=>console.log('webhook erro '+e.message));
+    }else{
+      bot.telegram.deleteWebhook({drop_pending_updates:true}).then(()=>{ bot.launch().then(()=>console.log('BOT ON polling')); });
+    }
+    setInterval(()=>{ const url=process.env.RENDER_EXTERNAL_URL || (domain?'https://'+domain:''); if(url) axios.get(url+'/ping').then(()=>console.log('keepalive ping')).catch(()=>{}); }, 9*60*1000);
+  }
+});
+
+if(bot){
+  const menu=Markup.keyboard([['Buscar OS','Materiais OS'],['Resumo','Dashboard'],['Limpar']]).resize();
+  bot.catch((err,ctx)=>{ console.log('BOT ERRO',err.message); });
+  bot.start((ctx)=>ctx.reply('ZROF Online V13 FIX GRAFICOS',menu));
+  bot.hears('Resumo', async (ctx)=>{
+    try{
+      const d=await lerPlanilha(); const mm=await lerMateriais();
+      const agora=new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'});
+      const retirados=mm.total-mm.totalPend;
+      const percMina=d.totalOrdens?Math.round(d.totalMina/d.totalOrdens*100):0;
+      const percUsina=d.totalOrdens?Math.round(d.totalUsina/d.totalOrdens*100):0;
+      const percRet=mm.total?Math.round(retirados/mm.total*100):0;
+      let txt='📊 RESUMO ZROF\n🕒 '+agora+'\n━━━━━━━━━━━━━━━━━━━━\n\n📋 ORDENS\nTotal de ordens: '+d.totalOrdens+'\nOrdens Mina: '+d.totalMina+' ('+percMina+'%)\nOrdens Usina: '+d.totalUsina+' ('+percUsina+'%)\n\n📦 MATERIAIS BD_MAT\nMateriais pendentes: '+mm.totalPend+'/'+mm.total+'\nMateriais retirados: '+retirados+'/'+mm.total+' ('+percRet+'% concluido)\n\n🔗 Dashboard: https://'+(process.env.RENDER_EXTERNAL_HOSTNAME||'seu-app')
