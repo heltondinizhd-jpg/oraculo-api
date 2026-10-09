@@ -5,7 +5,11 @@ const express = require('express');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID || process.env.GOOGLE_SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
 const PORT = process.env.PORT || 3000;
-if (!BOT_TOKEN) process.exit(1);
+
+if (!BOT_TOKEN) {
+  console.log('BOT_TOKEN nao definido');
+  process.exit(1);
+}
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
@@ -15,14 +19,19 @@ let cachePlanilha = { dados: null, hora: 0 };
 let esperandoFiltro = {};
 
 async function parseCSV(text) {
-  const rows = []; let cur = '', row = [], inQuotes = false;
+  const rows = [];
+  let cur = '', row = [], inQ = false;
   for (let i = 0; i < text.length; i++) {
-    const c = text[i]; const next = text[i+1];
-    if (c === '"') { if (inQuotes && next === '"') { cur += '"'; i++; } else inQuotes =!inQuotes; }
-    else if (c === ',' &&!inQuotes) { row.push(cur); cur = ''; }
-    else if ((c === '\n' || c === '\r') &&!inQuotes) {
+    const c = text[i];
+    const n = text[i+1];
+    if (c === '"') {
+      if (inQ && n === '"') { cur += '"'; i++; }
+      else inQ =!inQ;
+    } else if (c === ',' &&!inQ) {
+      row.push(cur); cur = '';
+    } else if ((c === '\n' || c === '\r') &&!inQ) {
       if (cur || row.length) { row.push(cur); rows.push(row); row=[]; cur=''; }
-      if (c === '\r' && next === '\n') i++;
+      if (c === '\r' && n === '\n') i++;
     } else cur += c;
   }
   if (cur || row.length) { row.push(cur); rows.push(row); }
@@ -31,120 +40,163 @@ async function parseCSV(text) {
 
 async function lerPlanilhaCompleta() {
   if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
-  let allDataRows = []; let cabecalho = null; let offset = 0;
+  let allRows = [];
+  let cab = null;
+  let offset = 0;
   while (true) {
-    const tq = 'SELECT * LIMIT 1000 OFFSET ' + offset;
-    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent(tq);
+    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent('SELECT * LIMIT 1000 OFFSET ' + offset);
     try {
       const r = await axios.get(url, { responseType: 'text', timeout: 15000 });
       const rows = await parseCSV(r.data);
-      if (rows.length === 0) break;
-      if (!cabecalho) { cabecalho = rows[0].map(h=>h.replace(/"/g,'').trim()); allDataRows.push(...rows.slice(1)); }
-      else { allDataRows.push(...rows); }
+      if (!rows.length) break;
+      if (!cab) { cab = rows[0].map(h=>h.replace(/"/g,'').trim()); allRows.push(...rows.slice(1)); }
+      else allRows.push(...rows);
       if (rows.length < 1000) break;
-      offset += 1000; if (offset > 15000) break;
+      offset += 1000;
+      if (offset > 15000) break;
     } catch (e) { break; }
   }
-  const cabUpper = cabecalho.map(h=>h.toUpperCase());
-  const idxLead = cabUpper.findIndex(h=>h.includes('LEAD'));
-  const idxQtd = cabUpper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
-  const idxOS = cabUpper.findIndex(h=>h==='OS');
-  const idxSetor = cabUpper.findIndex(h=>h.includes('SETOR'));
-  const idxFamilia = cabUpper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
-  const idxStatus = cabUpper.findIndex(h=>h.includes('STATUS'));
-
-  const dados = allDataRows.map(cols=>{
-    let obj = {}; cabecalho.forEach((h, idx)=>{ obj[h]=(cols[idx]||'').replace(/^"|"$/g,'').trim(); });
-    let lead = 0; if(idxLead>=0){ const num = parseInt(String(obj[cabecalho[idxLead]]||'').replace(/[^0-9\-]/g,'')); if(!isNaN(num)) lead=num; }
-    let qtd = 0; if(idxQtd>=0){ qtd = parseFloat(String(obj[cabecalho[idxQtd]]||'0').replace(',','.'))||0; }
-    obj._leadTime=lead; obj._qtd=qtd; obj._os=obj[cabecalho[idxOS]]||''; 
-    obj._setor=idxSetor>=0? (obj[cabecalho[idxSetor]]||'SEM SETOR'):'SEM SETOR';
-    obj._familia=idxFamilia>=0? (obj[cabecalho[idxFamilia]]||'SEM FAMILIA'):'SEM FAMILIA';
-    obj._status=idxStatus>=0?obj[cabecalho[idxStatus]]:'';
-    obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
-    return obj;
+  const upper = cab.map(h=>h.toUpperCase());
+  const idxOS = upper.findIndex(h=>h==='OS');
+  const idxSetor = upper.findIndex(h=>h.includes('SETOR'));
+  const idxFamilia = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
+  const idxQtd = upper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
+  const idxLead = upper.findIndex(h=>h.includes('LEAD'));
+  const dados = allRows.map(cols=>{
+    let o={}; cab.forEach((h,i)=>o[h]=(cols[i]||'').replace(/^"|"$/g,'').trim());
+    o._os = o[cab[idxOS]]||'';
+    o._setor = idxSetor>=0? (o[cab[idxSetor]]||'SEM SETOR') : 'SEM SETOR';
+    o._familia = idxFamilia>=0? (o[cab[idxFamilia]]||'SEM FAMILIA') : 'SEM FAMILIA';
+    o._qtd = idxQtd>=0? (parseFloat(String(o[cab[idxQtd]]||'0').replace(',','.'))||0) : 0;
+    o._lead = idxLead>=0? (parseInt(o[cab[idxLead]])||0) : 0;
+    o._busca = Object.values(o).join(' ').toLowerCase();
+    return o;
   }).filter(o=>o._os);
-
-  const res={cabecalho,dados}; cachePlanilha={dados:res,hora:Date.now()};
-  console.log('LIDO: '+dados.length+' linhas | OS unicas: '+new Set(dados.map(d=>d._os)).size);
-  return res;
+  const ret = { cabecalho: cab, dados };
+  cachePlanilha = { dados: ret, hora: Date.now() };
+  console.log('LIDO ' + dados.length + ' linhas');
+  return ret;
 }
 
 const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
-
 bot.start((ctx) => ctx.reply('Bot ZROF - Online', menu));
 bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
 bot.command('dashboard', (ctx) => {
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  const url = domain? `https://${domain}/dashboard` : `/dashboard`;
-  return ctx.reply(`Dashboard: ${url}`, menu);
+  const url = domain? 'https://'+domain+'/dashboard' : '/dashboard';
+  return ctx.reply('Dashboard: '+url, menu);
 });
 bot.command('resumo', async (ctx) => {
   const { dados } = await lerPlanilhaCompleta();
   const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-  let txt = `RESUMO: ${unicas.length} OS unicas / ${dados.length} materiais\n`;
-  const porSetor={}; unicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-  Object.entries(porSetor).forEach(([k,v])=> txt+= `${k}: ${v}\n`);
-  return ctx.reply(txt.substring(0,4096), menu);
-});
-bot.command('alertas', async (ctx) => {
-  const { dados } = await lerPlanilhaCompleta();
-  const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-  const imediatas = unicas.filter(d=>d._leadTime >= 180).sort((a,b)=>b._leadTime - a._leadTime);
-  if (imediatas.length===0) return ctx.reply('Nenhuma OS >=180d', menu);
-  let txt = `ALERTAS LEAD > 120d: ${unicas.filter(d=>d._leadTime>=120).length} OS\n\nIMEDIATA (>=180d):\n`;
-  imediatas.slice(0,30).forEach(o=> txt+= `OS ${o._os} | ${o._leadTime}d | ${o._setor}\n`);
-  return ctx.reply(txt.substring(0,4096), menu);
-});
-bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], (ctx) => {
-  const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
-  esperandoFiltro[ctx.from.id]=mapa[ctx.message.text];
-  return ctx.reply('Digite o valor para '+ctx.message.text+':');
+  return ctx.reply('OS unicas: '+unicas.length+' | Materiais: '+dados.length, menu);
 });
 bot.on('text', async (ctx) => {
-  try {
-    const textoOriginal = ctx.message.text.trim(); if (textoOriginal.startsWith('/')) return;
-    if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(textoOriginal)) return;
-    const id = ctx.from.id; const texto = textoOriginal.toLowerCase();
-    const { cabecalho, dados } = await lerPlanilhaCompleta();
-    const filtroAtivo = esperandoFiltro[id];
-    let encontradas = filtroAtivo? dados.filter(d=>(d[filtroAtivo]||'').toLowerCase().includes(texto)) : dados.filter(d=>d._textoBusca.includes(texto));
-    delete esperandoFiltro[id];
-    if (encontradas.length===0) return ctx.reply('Nada para "'+textoOriginal+'"', menu);
-    if (encontradas.length<=20) {
-      for (const os of encontradas) {
-        let r = `OS ${os._os} | QTD RET: ${os._qtd} ${os._qtd==0?'(PENDENTE)':''}\n`;
-        cabecalho.slice(0,10).forEach(col=>{ r+= `${col}: ${os[col]||'-'}\n`; });
-        await ctx.reply(r.substring(0,4096));
-      }
-      return ctx.reply(`Total: ${encontradas.length} linhas`, menu);
-    } else {
-      return ctx.reply(`${encontradas.length} linhas encontradas para "${textoOriginal}". Use /dashboard para ver completo.`, menu);
-    }
-  } catch(e){ return ctx.reply('Erro na busca', menu); }
+  const txt = ctx.message.text.trim();
+  if (txt.startsWith('/')) return;
+  if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(txt)) {
+    const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
+    esperandoFiltro[ctx.from.id]=mapa[txt];
+    return ctx.reply('Digite valor para '+txt+':');
+  }
+  const busca = txt.toLowerCase();
+  const { dados } = await lerPlanilhaCompleta();
+  const filtro = esperandoFiltro[ctx.from.id];
+  let ach = filtro? dados.filter(d=>(d[filtro]||'').toLowerCase().includes(busca)) : dados.filter(d=>d._busca.includes(busca));
+  delete esperandoFiltro[ctx.from.id];
+  if (!ach.length) return ctx.reply('Nada para "'+txt+'"', menu);
+  for (let i=0;i<Math.min(ach.length,10);i++){
+    await ctx.reply('OS '+ach[i]._os+' | SETOR '+ach[i]._setor+' | FAM '+ach[i]._familia+' | QTD '+ach[i]._qtd);
+  }
+  return ctx.reply('Total: '+ach.length, menu);
 });
 
-// API - DADOS SEM QUEBRAR O HTML
 app.get('/api/dados', async (req,res)=>{
-  const { cabecalho, dados } = await lerPlanilhaCompleta();
-  res.json({ cabecalho, dados: dados.slice(0,8000) });
+  try{
+    const data = await lerPlanilhaCompleta();
+    res.json({ cabecalho: data.cabecalho, dados: data.dados.slice(0,8000) });
+  }catch(e){ res.json({cabecalho:[], dados:[]}); }
 });
 
-// DASHBOARD CORRIGIDO - 2 GRAFICOS SETOR E FAMILIA
 app.get('/dashboard', (req,res)=>{
-  res.send(`
+  const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}.tabs{display:flex;gap:8px;margin-bottom:12px}.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}.tab.active{background:#38bdf8;color:#000;font-weight:bold}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr} @media(max-width:900px){.grid{grid-template-columns:1fr}} input{padding:10px;border-radius:8px;border:none;width:180px} button{padding:10px 16px;border-radius:8px;border:none;background:#38bdf8;font-weight:bold;cursor:pointer;margin-left:6px} table{width:100%;border-collapse:collapse;margin-top:12px} th,td{border:1px solid #334155;padding:6px;font-size:11px;text-align:left}.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}</style>
-</head><body>
+<style>
+body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}
+.tabs{display:flex;gap:8px;margin-bottom:12px}
+.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}
+.tab.active{background:#38bdf8;color:#000;font-weight:bold}
+.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}
+.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{border:1px solid #334155;padding:6px;font-size:11px}
+.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}
+input,button{padding:10px;border-radius:8px;border:none}
+button{background:#38bdf8;font-weight:bold;margin-left:6px}
+input{width:180px}
+</style></head><body>
 <h2 id="titulo">Carregando...</h2>
-<div class="tabs"><div class="tab active" onclick="showTab(1)">📊 Nº Ordens por Setor e Família</div><div class="tab" onclick="showTab(2)">📦 Material Pendente (Qtd.retirada=0)</div></div>
-<div id="tab1"><div class="grid"><div class="card"><h3>Nº de Ordens por Setor</h3><canvas id="cSetor"></canvas></div><div class="card"><h3>Nº de Ordens por Família</h3><canvas id="cFamilia"></canvas></div></div><div class="card" id="resumo"></div></div>
-<div id="tab2" style="display:none"><div class="card"><h3>Consulta por OS - retorna todas as linhas</h3><input id="buscaOS" placeholder="Digite a OS"><button onclick="buscar()">Buscar</button><button onclick="buscarPend()">Só pendentes</button><div id="resultado"></div></div></div>
+<div class="tabs">
+<div class="tab active" id="t1" onclick="showTab(1)">N Ordens por Setor e Familia</div>
+<div class="tab" id="t2" onclick="showTab(2)">Material Pendente</div>
+</div>
+<div id="tab1">
+<div class="grid">
+<div class="card"><h3>N de Ordens por Setor</h3><canvas id="cSetor"></canvas></div>
+<div class="card"><h3>N de Ordens por Familia</h3><canvas id="cFamilia"></canvas></div>
+</div>
+<div class="card" id="resumo"></div>
+</div>
+<div id="tab2" style="display:none">
+<div class="card"><h3>Consulta OS</h3>
+<input id="buscaOS" placeholder="Digite a OS">
+<button onclick="buscar()">Buscar</button>
+<button onclick="buscarPend()">So Pendentes</button>
+<div id="resultado"></div>
+</div>
+</div>
 <script>
-let dadosGlobais=[]; let cabGlobais=[];
-function showTab(n){ document.getElementById('tab1').style.display=n==1?'block':'none'; document.getElementById('tab2').style.display=n==2?'block':'none'; document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active', i==n-1)); }
+let dadosGlobais=[];
+let cabGlobais=[];
+function showTab(n){
+document.getElementById('tab1').style.display=n==1?'block':'none';
+document.getElementById('tab2').style.display=n==2?'block':'none';
+document.getElementById('t1').className=n==1?'tab active':'tab';
+document.getElementById('t2').className=n==2?'tab active':'tab';
+}
 function render(lista){
-  if(!lista.length){ document.getElementById('resultado').innerHTML='<p>Nenhuma linha encontrada</p>'; return; }
-  let html='<p>Total: '+lista.length+' materiais | Pendentes: '+lista.filter(d=>d._qtd==0).length+'</p><div style="overflow:auto"><table><tr>'; cabGlobais.forEach(h=>html+='<th>'+h+'</th>'); html+='</tr>';
-  lista.forEach(d=>{
+if(!lista.length){document.getElementById('resultado').innerHTML='<p>Nada</p>';return;}
+let h='<p>'+lista.length+' linhas | Pend: '+lista.filter(function(d){return d._qtd==0}).length+'</p><div style="overflow:auto"><table><tr>';
+cabGlobais.forEach(function(c){h+='<th>'+c+'</th>'});
+h+='</tr>';
+lista.forEach(function(d){
+let cls=d._qtd==0?'pend':'';
+h+='<tr class="'+cls+'">';
+cabGlobais.forEach(function(c){h+='<td>'+(d[c]||'')+'</td>'});
+h+='</tr>';
+});
+h+='</table></div>';
+document.getElementById('resultado').innerHTML=h;
+}
+function buscar(){
+let os=document.getElementById('buscaOS').value.trim().toLowerCase();
+if(!os)return;
+render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os)}));
+}
+function buscarPend(){
+let os=document.getElementById('buscaOS').value.trim().toLowerCase();
+if(!os)return;
+render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os) && d._qtd==0}));
+}
+fetch('/api/dados').then(function(r){return r.json()}).then(function(j){
+dadosGlobais=j.dados; cabGlobais=j.cabecalho;
+let mapa={};
+dadosGlobais.forEach(function(d){mapa[d._os]=d});
+let unicas=Object.values(mapa);
+let porSetor={}; unicas.forEach(function(d){porSetor[d._setor]=(porSetor[d._setor]||0)+1});
+let porFamilia={}; unicas.forEach(function(d){porFamilia[d._familia]=(porFamilia[d._familia]||0)+1});
+document.getElementById('titulo').innerText='ZROF - '+unicas.length+' OS / '+dadosGlobais.length+' materiais';
+document.getElementById('resumo').innerText='Total OS: '+unicas.length+' | Pendentes: '+dadosGlobais.filter(function(d){return d._qtd==0}).length;
+new Chart(document.getElementById('cSetor'),{type:'bar',data:{labels:Object.keys(porSetor),datasets:[{label:'Ordens',data:Object.values(porSet
