@@ -52,34 +52,18 @@ async function lerPlanilhaCompleta() {
       break;
     }
   }
-  // === ALTERAÇÃO AQUI: LÊ LEAD TIME DIRETO DA PLANILHA ===
   const idxEmissao = cabecalho? cabecalho.findIndex(h => h.includes('EMISS')) : -1;
   const idxLead = cabecalho? cabecalho.findIndex(h => h.includes('LEAD')) : -1;
-  // =======================================================
+
   const dados = allDataRows.map(cols => {
     let obj = {}; cabecalho.forEach((h, idx) => obj[h] = (cols[idx] || '').replace(/^"|"$/g,'').trim());
     const emissaoStr = idxEmissao >=0? (cols[idxEmissao]||'') : '';
 
-    // NOVO: pega LEAD da coluna LEAD TIME
     let lead = 0;
     if (idxLead >= 0) {
       const rawLead = (cols[idxLead] || '').replace(/^"|"$/g,'').trim();
-      // pega só número, ex: "180", "180 dias", "180,00"
       const num = parseInt(String(rawLead).replace(/[^0-9\-]/g,''));
       if (!isNaN(num)) lead = num;
-    } else {
-      // fallback antigo se não achar coluna LEAD (não deve usar)
-      const m = emissaoStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-      if (m) {
-        let d=parseInt(m[1]), mo=parseInt(m[2])-1, a=parseInt(m[3]);
-        if(a<100) a+=2000;
-        const dt=new Date(a,mo,d);
-        dt.setHours(0,0,0,0);
-        if(!isNaN(dt)) {
-          const hoje = new Date(); hoje.setHours(0,0,0,0);
-          lead=Math.floor((hoje-dt)/(1000*60*60*24));
-        }
-      }
     }
 
     obj._leadTime=lead;
@@ -87,14 +71,16 @@ async function lerPlanilhaCompleta() {
     obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
     return obj;
   }).filter(o=>o['OS']);
-  const res = { cabecalho, dados }; cachePlanilha={ dados: res, hora: Date.now() };
-  console.log(`TOTAL LIDO: ${dados.length} OS | LEAD da coluna planilha`);
+
+  const res = { cabecalho, dados };
+  cachePlanilha={ dados: res, hora: Date.now() };
+  console.log(`TOTAL LIDO: ${dados.length} OS | LEAD da planilha`);
   return res;
 }
 
 const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
 
-bot.start((ctx) => ctx.reply('🤖 Bot de Ordens - Dashboard Ativo', menu));
+bot.start((ctx) => ctx.reply('🤖 Bot de Ordens - Dashboard com gráfico', menu));
 bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
 bot.command('resumo', async (ctx) => {
   try {
@@ -107,16 +93,9 @@ bot.command('resumo', async (ctx) => {
 });
 bot.command('dashboard', (ctx) => {
   const host = process.env.RENDER_EXTERNAL_HOSTNAME || `localhost:${PORT}`;
-  return ctx.reply(`📈 Dashboard: https://${host}/dashboard`, menu);
+  return ctx.reply(`📈 Dashboard com gráficos: https://${host}/dashboard`, menu);
 });
 
 bot.command('alertas', async (ctx) => {
   try {
     const { dados } = await lerPlanilhaCompleta();
-    const imediatas = dados.filter(d=>d._leadTime >= 180).sort((a,b)=>b._leadTime - a._leadTime);
-    const urgentes = dados.filter(d=>d._leadTime >= 150 && d._leadTime < 180).sort((a,b)=>b._leadTime - a._leadTime);
-    const prioritarias = dados.filter(d=>d._leadTime >= 120 && d._leadTime < 150).sort((a,b)=>b._leadTime - a._leadTime);
-    const total = imediatas.length + urgentes.length + prioritarias.length;
-    if (total === 0) return ctx.reply('✅ Nenhuma OS com mais de 120 dias!', menu);
-    let txt = `🚨 ALERTAS LEAD > 120 DIAS: ${total} OS\n━━━━━━━━━━━━\n`;
-    if (imediatas.length) { txt+= `\n🔴 IMEDI
