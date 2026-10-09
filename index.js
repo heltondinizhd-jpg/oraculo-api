@@ -46,7 +46,6 @@ async function lerPlanilhaCompleta() {
     } catch (e) { break; }
   }
   const cabUpper = cabecalho.map(h=>h.toUpperCase());
-  const idxEmissao = cabUpper.findIndex(h=>h.includes('EMISS'));
   const idxLead = cabUpper.findIndex(h=>h.includes('LEAD'));
   const idxQtd = cabUpper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
   const idxOS = cabUpper.findIndex(h=>h==='OS');
@@ -56,22 +55,17 @@ async function lerPlanilhaCompleta() {
 
   const dados = allDataRows.map(cols=>{
     let obj = {}; cabecalho.forEach((h, idx)=>{ obj[h]=(cols[idx]||'').replace(/^"|"$/g,'').trim(); });
-    let lead = 0;
-    if(idxLead>=0){ const num = parseInt(String(obj[cabecalho[idxLead]]||'').replace(/[^0-9\-]/g,'')); if(!isNaN(num)) lead=num; }
-    let qtd = 0;
-    if(idxQtd>=0){ qtd = parseFloat(String(obj[cabecalho[idxQtd]]||'0').replace(',','.'))||0; }
-    obj._leadTime=lead;
-    obj._qtd=qtd;
-    obj._os=obj[cabecalho[idxOS]]||'';
+    let lead = 0; if(idxLead>=0){ const num = parseInt(String(obj[cabecalho[idxLead]]||'').replace(/[^0-9\-]/g,'')); if(!isNaN(num)) lead=num; }
+    let qtd = 0; if(idxQtd>=0){ qtd = parseFloat(String(obj[cabecalho[idxQtd]]||'0').replace(',','.'))||0; }
+    obj._leadTime=lead; obj._qtd=qtd; obj._os=obj[cabecalho[idxOS]]||''; 
     obj._setor=idxSetor>=0? (obj[cabecalho[idxSetor]]||'SEM SETOR'):'SEM SETOR';
     obj._familia=idxFamilia>=0? (obj[cabecalho[idxFamilia]]||'SEM FAMILIA'):'SEM FAMILIA';
     obj._status=idxStatus>=0?obj[cabecalho[idxStatus]]:'';
-    obj._emissaoRaw=idxEmissao>=0?obj[cabecalho[idxEmissao]]:'';
     obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
     return obj;
   }).filter(o=>o._os);
 
-  const res={cabecalho,dados,idxQtd}; cachePlanilha={dados:res,hora:Date.now()};
+  const res={cabecalho,dados}; cachePlanilha={dados:res,hora:Date.now()};
   console.log('LIDO: '+dados.length+' linhas | OS unicas: '+new Set(dados.map(d=>d._os)).size);
   return res;
 }
@@ -130,35 +124,27 @@ bot.on('text', async (ctx) => {
   } catch(e){ return ctx.reply('Erro na busca', menu); }
 });
 
-// DASHBOARD ATUALIZADO - 2 GRAFICOS POR SETOR E FAMILIA
-app.get('/dashboard', async (req,res)=>{
-  try{
-    const { cabecalho, dados } = await lerPlanilhaCompleta();
-    const osUnicas = [...new Map(dados.map(d=>[d._os,d])).values()];
+// API - DADOS SEM QUEBRAR O HTML
+app.get('/api/dados', async (req,res)=>{
+  const { cabecalho, dados } = await lerPlanilhaCompleta();
+  res.json({ cabecalho, dados: dados.slice(0,8000) });
+});
 
-    const porSetor={}; osUnicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-    const porFamilia={}; osUnicas.forEach(d=>{ porFamilia[d._familia]=(porFamilia[d._familia]||0)+1; });
-    const pendentesTotal = dados.filter(d=>d._qtd==0).length;
-
-    res.send(`
-    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}.tabs{display:flex;gap:8px;margin-bottom:12px}.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}.tab.active{background:#38bdf8;color:#000;font-weight:bold}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr} @media(max-width:900px){.grid{grid-template-columns:1fr}} input{padding:10px;border-radius:8px;border:none;width:180px} button{padding:10px 16px;border-radius:8px;border:none;background:#38bdf8;font-weight:bold;cursor:pointer;margin-left:6px} table{width:100%;border-collapse:collapse;margin-top:12px} th,td{border:1px solid #334155;padding:6px;font-size:11px;text-align:left}.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}</style>
-    </head><body>
-    <h2>ZROF - ${osUnicas.length} OS / ${dados.length} materiais</h2>
-    <div class="tabs"><div class="tab active" onclick="showTab(1)">📊 Nº Ordens por Setor e Família</div><div class="tab" onclick="showTab(2)">📦 Material Pendente (Qtd.retirada=0)</div></div>
-
-    <div id="tab1">
-      <div class="grid">
-        <div class="card"><h3>Nº de Ordens por Setor</h3><canvas id="cSetor"></canvas></div>
-        <div class="card"><h3>Nº de Ordens por Família</h3><canvas id="cFamilia"></canvas></div>
-      </div>
-      <div class="card"><h3>Resumo</h3><p>Total OS únicas: ${osUnicas.length}</p><p>Materiais pendentes (Qtd.retirada=0): ${pendentesTotal}</p></div>
-    </div>
-
-    <div id="tab2" style="display:none"><div class="card"><h3>Consulta por OS - retorna todas as linhas</h3><input id="buscaOS" placeholder="Digite a OS"><button onclick="buscar()">Buscar</button><button onclick="buscarPend()">Só pendentes</button><div id="resultado"></div></div></div>
-
-    <script>
-      const dados = ${JSON.stringify(dados.slice(0,8000))};
-      const cab = ${JSON.stringify(cabecalho)};
-      function showTab(n){ document.getElementById('tab1').style.display=n==1?'block':'none
+// DASHBOARD CORRIGIDO - 2 GRAFICOS SETOR E FAMILIA
+app.get('/dashboard', (req,res)=>{
+  res.send(`
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}.tabs{display:flex;gap:8px;margin-bottom:12px}.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}.tab.active{background:#38bdf8;color:#000;font-weight:bold}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr} @media(max-width:900px){.grid{grid-template-columns:1fr}} input{padding:10px;border-radius:8px;border:none;width:180px} button{padding:10px 16px;border-radius:8px;border:none;background:#38bdf8;font-weight:bold;cursor:pointer;margin-left:6px} table{width:100%;border-collapse:collapse;margin-top:12px} th,td{border:1px solid #334155;padding:6px;font-size:11px;text-align:left}.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}</style>
+</head><body>
+<h2 id="titulo">Carregando...</h2>
+<div class="tabs"><div class="tab active" onclick="showTab(1)">📊 Nº Ordens por Setor e Família</div><div class="tab" onclick="showTab(2)">📦 Material Pendente (Qtd.retirada=0)</div></div>
+<div id="tab1"><div class="grid"><div class="card"><h3>Nº de Ordens por Setor</h3><canvas id="cSetor"></canvas></div><div class="card"><h3>Nº de Ordens por Família</h3><canvas id="cFamilia"></canvas></div></div><div class="card" id="resumo"></div></div>
+<div id="tab2" style="display:none"><div class="card"><h3>Consulta por OS - retorna todas as linhas</h3><input id="buscaOS" placeholder="Digite a OS"><button onclick="buscar()">Buscar</button><button onclick="buscarPend()">Só pendentes</button><div id="resultado"></div></div></div>
+<script>
+let dadosGlobais=[]; let cabGlobais=[];
+function showTab(n){ document.getElementById('tab1').style.display=n==1?'block':'none'; document.getElementById('tab2').style.display=n==2?'block':'none'; document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active', i==n-1)); }
+function render(lista){
+  if(!lista.length){ document.getElementById('resultado').innerHTML='<p>Nenhuma linha encontrada</p>'; return; }
+  let html='<p>Total: '+lista.length+' materiais | Pendentes: '+lista.filter(d=>d._qtd==0).length+'</p><div style="overflow:auto"><table><tr>'; cabGlobais.forEach(h=>html+='<th>'+h+'</th>'); html+='</tr>';
+  lista.forEach(d=>{
