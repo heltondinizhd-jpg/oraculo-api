@@ -1,3 +1,4 @@
+// V2 - Tenta 2 URLs e mostra erro detalhado
 const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const axios = require('axios');
@@ -7,11 +8,22 @@ const PORT = process.env.PORT || 3000;
 if(!BOT_TOKEN) process.exit(1);
 const bot=new Telegraf(BOT_TOKEN);
 const app=express();
-let cache=null;let cacheHora=0;
+let cache=null;let cacheHora=0;let ultimoErro='nunca tentou';
+
 async function getCSV(gid){
- const url='https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/export?format=csv&gid='+gid;
- const r=await axios.get(url,{responseType:'text',timeout:30000});
- return r.data;
+ const urls=[
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${gid}`,
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${gid}`
+ ];
+ for(let url of urls){
+  try{
+   console.log('Tentando '+url);
+   const r=await axios.get(url,{responseType:'text',timeout:15000,headers:{'User-Agent':'Mozilla/5.0'}});
+   if(r.data && r.data.length>50 &&!r.data.includes('<html')) return r.data;
+   ultimoErro='HTML retornado em '+url;
+  }catch(e){ ultimoErro=e.message+' em '+url; console.log(ultimoErro); }
+ }
+ throw new Error(ultimoErro);
 }
 function parseCSV(text){
  const l=text.split(/\r?\n/).filter(x=>x.trim()!=='');
@@ -31,8 +43,9 @@ function parseCSV(text){
 async function lerPlanilha(){
  if(cache&&Date.now()-cacheHora<120000) return cache;
  try{
-  const csv1=await getCSV('0');let csv2=null;
-  try{csv2=await getCSV('1');}catch(e){}
+  const csv1=await getCSV('0');
+  let csv2=null;
+  try{ csv2=await getCSV('1132978923'); }catch(e){ try{ csv2=await getCSV('1'); }catch(e2){ console.log('Sem segunda aba'); } }
   const p1=parseCSV(csv1);
   const up1=p1.cab.map(h=>h.toUpperCase());
   let iOS=up1.indexOf('OS');if(iOS<0)iOS=up1.findIndex(h=>h.includes('ORDEM'));
@@ -71,34 +84,35 @@ async function lerPlanilha(){
   }
   const count=(arr,key)=>{const o={};Object.values(arr).forEach(v=>{const k=v[key]||'SEM';o[k]=(o[k]||0)+1;});return o;};
   const res={total:Object.keys(mapaGeral).length,tMina:Object.keys(mapaMina).length,tUsina:Object.keys(mapaUsina).length,totPend,porSetor:count(mapaGeral,'setor'),porMacro:{MINA:Object.keys(mapaMina).length,USINA:Object.keys(mapaUsina).length},dadosFull};
-  cache=res;cacheHora=Date.now();console.log('OK '+res.total+' pend '+res.totPend);return res;
- }catch(e){console.log('ERRO '+e.message);return cache;}
+  cache=res;cacheHora=Date.now();console.log('OK '+res.total);return res;
+ }catch(e){ ultimoErro=e.message; console.log('FALHA '+ultimoErro); return cache; }
 }
 lerPlanilha();
 const menu=Markup.keyboard([['Buscar OS','Resumo'],['Dashboard','Limpar']]).resize();
 bot.start(ctx=>ctx.reply('ZROF Online',menu));
-bot.hears('Resumo',ctx=>{ctx.message.text='/resumo';bot.handleUpdate({message:ctx.message});});
-bot.hears('Limpar',async ctx=>{cache=null;await ctx.reply('Recarregando...',menu);const r=await lerPlanilha();ctx.reply('Total:'+r.total+' Pend:'+r.totPend,menu);});
+bot.hears('Resumo',async ctx=>{const d=await lerPlanilha();if(!d)return ctx.reply('Erro: '+ultimoErro+' - Publica na web em Arquivo > Publicar na web > CSV',menu);let t=`RESUMO\nTotal:${d.total} Mina:${d.tMina} Usina:${d.tUsina} Pend:${d.totPend}\n`;Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(kv=>{t+=`${kv[0]}:${kv[1]}\n`;});ctx.reply(t,menu);});
+bot.hears('Limpar',async ctx=>{cache=null;await ctx.reply('Limpando...',menu);const r=await lerPlanilha();if(r)ctx.reply(`Total:${r.total} Pend:${r.totPend}`,menu);else ctx.reply('Falha: '+ultimoErro,menu);});
 bot.hears('Buscar OS',ctx=>ctx.reply('Digite a OS:',menu));
-bot.hears('Dashboard',ctx=>{const d=process.env.RENDER_EXTERNAL_HOSTNAME;const url=d?'https://'+d+'/dashboard':'/dashboard';ctx.reply(url,menu);});
-bot.command('resumo',async ctx=>{const d=await lerPlanilha();if(!d)return ctx.reply('Carregando...',menu);let t='RESUMO\nTotal:'+d.total+' Mina:'+d.tMina+' Usina:'+d.tUsina+' Pend:'+d.totPend+'\n';Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(kv=>{t+=kv[0]+':'+kv[1]+'\n';});ctx.reply(t,menu);});
-bot.action(/pend:(.+)/,async ctx=>{await ctx.answerCbQuery();const os=ctx.match[1];const d=await lerPlanilha();const it=d.dadosFull.find(x=>x.os===os);if(!it)return;let txt='PENDENTES OS '+os+' ('+it.pend.length+')\n';it.pend.forEach((p,i)=>{txt+=(i+1)+') '+p.material+' '+p.texto+' Nec:'+p.qtdNec+' Ret:'+p.qtdRet+'\n';});for(let i=0;i<txt.length;i+=4000)await ctx.reply(txt.substring(i,i+4000),menu);});
+bot.hears('Dashboard',ctx=>ctx.reply(`https://oraculo-api-7ozv.onrender.com/dashboard`,menu));
+bot.command('resumo',async ctx=>{const d=await lerPlanilha();if(!d)return ctx.reply('Erro: '+ultimoErro,menu);let t=`RESUMO\nTotal:${d.total}\n`;ctx.reply(t,menu);});
+bot.action(/pend:(.+)/,async ctx=>{await ctx.answerCbQuery();const os=ctx.match[1];const d=await lerPlanilha();const it=d.dadosFull.find(x=>x.os===os);if(!it)return;let txt=`PENDENTES OS ${os} (${it.pend.length})\n`;it.pend.forEach((p,i)=>{txt+=`${i+1}) ${p.material} ${p.texto} Nec:${p.qtdNec} Ret:${p.qtdRet}\n`;});for(let i=0;i<txt.length;i+=4000)await ctx.reply(txt.substring(i,i+4000),menu);});
 bot.on('text',async ctx=>{
  const texto=ctx.message.text.trim();
  if(texto.startsWith('/')||['Buscar OS','Resumo','Dashboard','Limpar'].includes(texto))return;
- const d=await lerPlanilha();if(!d)return ctx.reply('Aguarde 10s',menu);
+ const d=await lerPlanilha();if(!d)return ctx.reply(`Ainda carregando / Erro: ${ultimoErro}\nPublique em Arquivo > Publicar na web > CSV`,menu);
  const dig=texto.replace(/\D/g,'');const busca=texto.toLowerCase();
  const ach=d.dadosFull.filter(x=>x.busca.includes(busca)||(dig&&x.os.includes(dig)));
  if(!ach.length)return ctx.reply('Nada para '+texto,menu);
  for(const it of ach.slice(0,2)){
-  let det='OS:'+it.os+' Setor:'+it.setor+' Macro:'+it.macro+'\n';
-  for(const k in it.row){if(it.row[k])det+=k+':'+it.row[k]+'\n';}
-  if(it.pend.length>0){det+='\nPEND:'+it.pend.length;await ctx.reply(det.substring(0,4000),Markup.inlineKeyboard([[Markup.button.callback('Ver '+it.pend.length+' Pend','pend:'+it.os)]]));}
+  let det=`OS:${it.os} Setor:${it.setor} Macro:${it.macro}\n`;
+  for(const k in it.row){if(it.row[k])det+=`${k}:${it.row[k]}\n`;}
+  if(it.pend.length>0){det+=`\nPEND:${it.pend.length}`;await ctx.reply(det.substring(0,4000),Markup.inlineKeyboard([[Markup.button.callback(`Ver ${it.pend.length} Pend`,`pend:${it.os}`)]]));}
   else await ctx.reply(det.substring(0,4000),menu);
  }
 });
 app.get('/',(req,res)=>res.send('OK'));
-app.get('/api/resumo',async(req,res)=>{const d=await lerPlanilha();res.json(d?{total:d.total,pend:d.totPend}:{erro:'loading'});});
-app.get('/dashboard',(req,res)=>{res.send('<h1>ZROF</h1><div id=t>loading</div><script>fetch("/api/resumo").then(r=>r.json()).then(d=>{document.getElementById("t").innerText="Total:"+d.total+" Pend:"+d.pend})</script>');});
+app.get('/api/resumo',async(req,res)=>{const d=await lerPlanilha();res.json(d?{total:d.total,pend:d.totPend,ultimoErro}:{erro:'loading',ultimoErro, dica:'Arquivo > Publicar na web > CSV'});});
+app.get('/api/debug',(req,res)=>res.json({ultimoErro,cache:!!cache,hora:new Date(cacheHora).toISOString()}));
+app.get('/dashboard',(req,res)=>res.send('<h1>ZROF</h1><div id=t>loading</div><script>fetch("/api/resumo").then(r=>r.json()).then(d=>{document.getElementById("t").innerText=JSON.stringify(d)})</script>'));
 app.listen(PORT,()=>console.log('WEB ON'));
 (async()=>{try{await bot.telegram.deleteWebhook({drop_pending_updates:true});}catch(e){}bot.launch().then(()=>console.log('BOT ON'));})();
