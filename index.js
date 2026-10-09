@@ -10,28 +10,29 @@ if (!BOT_TOKEN) process.exit(1);
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
-
 let cache = { dados: null, hora: 0 };
 
 async function lerPlanilha() {
-  // cache 2 minutos - conta ordens sempre que expirar
   if (cache.dados && Date.now() - cache.hora < 2*60*1000) return cache.dados;
   try {
     const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv';
     const r = await axios.get(url, { responseType: 'text', timeout: 25000 });
     const linhas = r.data.split(/\r?\n/).filter(l=>l.trim());
     const cab = linhas[0].split(',').map(s=>s.replace(/^"|"$/g,'').trim());
-    const upper = cab.map(h=>h.toUpperCase());
-    const idxOS = upper.findIndex(h=>h==='OS');
-    const idxSetor = upper.findIndex(h=>h.includes('SETOR'));
-    const idxFam = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
-    const idxQtd = upper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
+    const upper = cab.map(h=>h.toUpperCase().trim());
 
+    // Procura coluna OS exata
+    let idxOS = upper.indexOf('OS');
+    if (idxOS === -1) idxOS = upper.findIndex(h=>h==='ORDEM' || h.includes('Nº OS'));
+    let idxSetor = upper.findIndex(h=>h.includes('SETOR') || h.includes('ÁREA'));
+    let idxFam = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
+
+    const mapaOrdens = {}; // OS -> {setor, familia}
     const dadosFull = [];
-    const mapaOrdens = {};
 
     for (let i=1;i<linhas.length;i++){
       const linha = linhas[i];
+      if (!linha.trim()) continue;
       const cols = []; let cur='', inQ=false;
       for (let j=0;j<linha.length;j++){
         const c=linha[j];
@@ -41,34 +42,35 @@ async function lerPlanilha() {
       }
       cols.push(cur);
       const get = (idx)=> idx>=0? (cols[idx]||'').replace(/^"|"$/g,'').trim() : '';
-      const os = get(idxOS); if(!os) continue;
-      const setor = get(idxSetor)||'SEM SETOR';
-      const fam = get(idxFam)||'SEM FAMILIA';
-      const qtd = idxQtd>=0? parseFloat(get(idxQtd).replace(',','.'))||0 : 0;
-      dadosFull.push({ _os: os, _setor: setor, _familia: fam, _qtd: qtd, _busca: linha.toLowerCase() });
-      if (!mapaOrdens[os]) mapaOrdens[os] = { _setor: setor, _familia: fam };
+      const osRaw = get(idxOS);
+      const os = osRaw.replace(/\D/g,''); // só numeros
+      if(!os || os.length < 3) continue; // ignora OS vazia
+
+      const setor = (get(idxSetor)||'SEM SETOR').toUpperCase().trim();
+      const fam = (get(idxFam)||'SEM FAMILIA').toUpperCase().trim();
+
+      dadosFull.push({ _os: os, _setor: setor, _familia: fam, _busca: linha.toLowerCase() });
+      if (!mapaOrdens[os]) mapaOrdens[os] = { setor, familia: fam };
     }
 
-    const ordensUnicas = Object.keys(mapaOrdens).length;
-    const porSetor = {}; Object.values(mapaOrdens).forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-    const porFamilia = {}; Object.values(mapaOrdens).forEach(d=>{ porFamilia[d._familia]=(porFamilia[d._familia]||0)+1; });
-    const pendentes = dadosFull.filter(d=>d._qtd===0).length;
+    const totalOrdens = Object.keys(mapaOrdens).length;
+    const porSetor = {}; Object.values(mapaOrdens).forEach(d=>{ porSetor[d.setor]=(porSetor[d.setor]||0)+1; });
+    const porFamilia = {}; Object.values(mapaOrdens).forEach(d=>{ porFamilia[d.familia]=(porFamilia[d.familia]||0)+1; });
 
-    const result = { cab, totalLinhas: dadosFull.length, totalOrdens: ordensUnicas, osUnicas: ordensUnicas, porSetor, porFamilia, dadosFull, pendentes };
+    const result = { totalOrdens, porSetor, porFamilia, dadosFull, totalLinhas: linhas.length-1 };
     cache = { dados: result, hora: Date.now() };
-    console.log(`LIDO: ${result.totalOrdens} Ordens | ${result.totalLinhas} linhas`);
+    console.log(`LIDO CORRETO: ${totalOrdens} Ordens`);
     return result;
   } catch (e) {
     console.log('ERRO:', e.message);
-    return cache.dados || { cab:[], totalLinhas:0, totalOrdens:0, osUnicas:0, porSetor:{}, porFamilia:{}, dadosFull:[], pendentes:0, erro: e.message };
+    return cache.dados || { totalOrdens:0, porSetor:{}, porFamilia:{}, dadosFull:[], erro: e.message };
   }
 }
 
 lerPlanilha();
 
 const menu = Markup.keyboard([['/dashboard','/resumo']]).resize();
-
-bot.start((ctx)=>ctx.reply('Bot ZROF Online ✅\nDigite a OS ou use /resumo', menu));
+bot.start((ctx)=>ctx.reply('Bot ZROF Online ✅', menu));
 
 bot.command('dashboard', (ctx)=>{
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
@@ -76,14 +78,13 @@ bot.command('dashboard', (ctx)=>{
   return ctx.reply('Dashboard: '+url, menu);
 });
 
+// RESUMO LIMPO - SÓ O QUE VOCÊ PEDIU
 bot.command('resumo', async (ctx)=>{
   const d = await lerPlanilha();
   if (d.erro) return ctx.reply('Erro: '+d.erro);
 
   let txt = `📊 RESUMO ZROF\n\n`;
-  txt += `Total de Ordens: ${d.totalOrdens}\n`;
-  txt += `Total de Materiais: ${d.totalLinhas}\n`;
-  txt += `Pendentes (Qtd=0): ${d.pendentes}\n\n`;
+  txt += `Total de Ordens: ${d.totalOrdens}\n\n`;
 
   txt += `📍 POR SETOR:\n`;
   Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
@@ -91,17 +92,13 @@ bot.command('resumo', async (ctx)=>{
   txt += `\n👨‍👩‍👧‍👦 POR FAMILIA:\n`;
   Object.entries(d.porFamilia).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{ txt+= `${k}: ${v}\n`; });
 
-  if (txt.length > 4000) {
-    await ctx.reply(txt.substring(0,4000), menu);
-    await ctx.reply(txt.substring(4000,8000), menu);
-  } else {
-    await ctx.reply(txt, menu);
-  }
+  await ctx.reply(txt.substring(0,4000), menu);
+  if (txt.length > 4000) await ctx.reply(txt.substring(4000,8000), menu);
 });
 
 bot.command('limpar', async (ctx)=>{
   cache={dados:null,hora:0};
-  await ctx.reply('♻️ Recarregando planilha...');
+  await ctx.reply('♻️ Recarregando...');
   const d = await lerPlanilha();
   return ctx.reply(`Pronto! Total de Ordens: ${d.totalOrdens}`, menu);
 });
@@ -109,25 +106,20 @@ bot.command('limpar', async (ctx)=>{
 bot.on('text', async (ctx)=>{
   const texto = ctx.message.text.trim();
   if (texto.startsWith('/')) return;
-  if (['/dashboard','/resumo'].includes(texto)) return;
   try {
     const busca = texto.toLowerCase();
     const { dadosFull } = await lerPlanilha();
-    if (!dadosFull.length) return ctx.reply('Planilha vazia');
     const achadas = dadosFull.filter(d=>d._busca.includes(busca));
     if (!achadas.length) return ctx.reply(`Nada para "${texto}"`, menu);
-    if (achadas.length > 20) return ctx.reply(`${achadas.length} resultados para "${texto}" - seja mais especifico`, menu);
+    if (achadas.length > 15) return ctx.reply(`${achadas.length} resultados`, menu);
     for (const d of achadas.slice(0,10)){
-      const pend = d._qtd===0? ' ⚠️PENDENTE' : '';
-      await ctx.reply(`OS ${d._os}${pend}\nSetor: ${d._setor}\nFam: ${d._familia}\nQtd: ${d._qtd}`);
+      await ctx.reply(`OS ${d._os}\nSetor: ${d._setor}\nFam: ${d._familia}`);
     }
-    return ctx.reply(`Total: ${achadas.length} materiais`, menu);
-  } catch(e){ return ctx.reply('Erro busca'); }
+  } catch(e){}
 });
 
-app.get('/', (req,res)=>res.send('OK <a href="/dashboard">Dashboard</a> <a href="/api/resumo">API</a>'));
-app.get('/api/resumo', async (req,res)=>{ const d = await lerPlanilha(); res.json(d); });
-
+app.get('/', (req,res)=>res.send('OK'));
+app.get('/api/resumo', async (req,res)=>{ res.json(await lerPlanilha()); });
 app.get('/dashboard', (req,res)=>res.sendFile(__dirname + '/dash.html'));
 
 const dashHtml = `
@@ -141,13 +133,10 @@ const dashHtml = `
 <div class="card"><h3>N de Ordens por Setor</h3><canvas id="c1"></canvas></div>
 <div class="card"><h3>N de Ordens por Familia</h3><canvas id="c2"></canvas></div>
 </div>
-<div class="card" id="res"></div>
 <script>
 async function load(){
-  const r = await fetch("/api/resumo");
-  const d = await r.json();
-  document.getElementById("titulo").innerText = "ZROF - " + d.totalOrdens + " Ordens / " + d.totalLinhas + " materiais";
-  document.getElementById("res").innerText = "Pendentes: " + d.pendentes + " | Atualizado: " + new Date().toLocaleString();
+  const d = await fetch("/api/resumo").then(r=>r.json());
+  document.getElementById("titulo").innerText = "ZROF - " + d.totalOrdens + " Ordens";
   new Chart(document.getElementById("c1"),{type:"bar",data:{labels:Object.keys(d.porSetor),[STRIPPED]
   new Chart(document.getElementById("c2"),{type:"bar",data:{labels:Object.keys(d.porFamilia),[STRIPPED]
 }
@@ -156,12 +145,9 @@ load();
 </body></html>
 `;
 fs.writeFileSync(__dirname + '/dash.html', dashHtml);
-
 app.use(bot.webhookCallback('/telegram'));
-
 app.listen(PORT, async ()=>{
-  console.log('Porta '+PORT);
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  if (domain) { try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); console.log('webhook ok'); } catch(e){ console.log(e.message); } }
+  if (domain) { try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); } catch(e){} }
   else { bot.launch(); }
 });
