@@ -5,7 +5,11 @@ const express = require('express');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
 const PORT = process.env.PORT || 3000;
-if (!BOT_TOKEN) process.exit(1);
+
+if (!BOT_TOKEN) {
+  console.error('BOT_TOKEN não definido!');
+  process.exit(1);
+}
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
@@ -39,68 +43,70 @@ async function lerPlanilhaCompleta() {
       const r = await axios.get(url, { responseType: 'text', timeout: 15000 });
       const rows = await parseCSV(r.data);
       if (rows.length === 0) break;
-      if (!cabecalho) { cabecalho = rows[0].map(h=>h.replace(/"/g,'').trim()); allDataRows.push(...rows.slice(1)); }
-      else { allDataRows.push(...rows); }
+      if (!cabecalho) { cabecalho = rows[0].map(h=>h.replace(/"/g,'').trim().toUpperCase()); allDataRows.push(...rows.slice(1)); }
+      else { const isHeader = rows[0].join(',').toUpperCase().includes('OS'); allDataRows.push(...(isHeader? rows.slice(1) : rows)); }
       if (rows.length < 1000) break;
       offset += 1000; if (offset > 15000) break;
-    } catch (e) { break; }
+    } catch (e) { console.error('Erro planilha:', e.message); break; }
   }
-  const cabUpper = cabecalho.map(h=>h.toUpperCase());
-  const idxEmissao = cabUpper.findIndex(h=>h.includes('EMISS'));
-  const idxLead = cabUpper.findIndex(h=>h.includes('LEAD'));
-  const idxQtd = cabUpper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
-  const idxOS = cabUpper.findIndex(h=>h==='OS');
-  const idxSetor = cabUpper.findIndex(h=>h.includes('SETOR'));
-  const idxStatus = cabUpper.findIndex(h=>h.includes('STATUS'));
+  const idxEmissao = cabecalho? cabecalho.findIndex(h=>h.includes('EMISS')) : -1;
+  const idxLead = cabecalho? cabecalho.findIndex(h=>h.includes('LEAD')) : -1;
 
   const dados = allDataRows.map(cols=>{
     let obj = {}; cabecalho.forEach((h, idx)=>{ obj[h]=(cols[idx]||'').replace(/^"|"$/g,'').trim(); });
+    const emissaoStr = idxEmissao>=0? (cols[idxEmissao]||'') : '';
     let lead = 0;
-    if(idxLead>=0){ const num = parseInt(String(obj[cabecalho[idxLead]]||'').replace(/[^0-9\-]/g,'')); if(!isNaN(num)) lead=num; }
-    let qtd = 0;
-    if(idxQtd>=0){ qtd = parseFloat(String(obj[cabecalho[idxQtd]]||'0').replace(',','.'))||0; }
-    obj._leadTime=lead; obj._qtd=qtd; obj._os=obj[cabecalho[idxOS]]||''; obj._setor=idxSetor>=0?obj[cabecalho[idxSetor]]:''; obj._status=idxStatus>=0?obj[cabecalho[idxStatus]]:'';
-    obj._emissaoRaw=idxEmissao>=0?obj[cabecalho[idxEmissao]]:''; obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
+    if(idxLead>=0){
+      const rawLead = (cols[idxLead]||'').replace(/^"|"$/g,'').trim();
+      const num = parseInt(String(rawLead).replace(/[^0-9\-]/g,''));
+      if(!isNaN(num)) lead=num;
+    }
+    obj._leadTime=lead; obj._emissaoRaw=emissaoStr; obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
     return obj;
-  }).filter(o=>o._os);
+  }).filter(o=>o['OS']);
 
-  const res={cabecalho,dados,idxQtd}; cachePlanilha={dados:res,hora:Date.now()};
-  console.log('LIDO: '+dados.length+' linhas | OS unicas: '+new Set(dados.map(d=>d._os)).size);
+  const res={cabecalho,dados}; cachePlanilha={dados:res,hora:Date.now()};
+  console.log('TOTAL LIDO: '+dados.length+' OS | LEAD da planilha');
   return res;
 }
 
-// MENU COM DASHBOARD DE VOLTA
-const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
+// MENU SEM DASHBOARD
+const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas']]).resize();
 
-bot.start((ctx) => ctx.reply('Bot ZROF - Online', menu));
+bot.start((ctx) => ctx.reply('Bot de Ordens - Online', menu));
 bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
-bot.command('dashboard', (ctx) => {
-  const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  const url = domain? `https://${domain}/dashboard` : `/dashboard`;
-  return ctx.reply(`Dashboard: ${url}`, menu);
-});
 bot.command('resumo', async (ctx) => {
-  const { dados } = await lerPlanilhaCompleta();
-  const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-  let txt = `RESUMO: ${unicas.length} OS unicas / ${dados.length} materiais\n`;
-  const porSetor={}; unicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-  Object.entries(porSetor).forEach(([k,v])=> txt+= `${k}: ${v}\n`);
-  return ctx.reply(txt.substring(0,4096), menu);
+  try {
+    const { dados } = await lerPlanilhaCompleta();
+    let txt = 'RESUMO GERAL: ' + dados.length + ' OS\n';
+    const porSetor = {}; dados.forEach(d=>{ const s=d['SETOR']||'SEM SETOR'; porSetor[s]=(porSetor[s]||0)+1; });
+    Object.entries(porSetor).forEach(([k,v])=> txt+= k+': '+v+'\n');
+    return ctx.reply(txt.substring(0,4096), menu);
+  } catch(e){ return ctx.reply('Erro no resumo', menu); }
 });
+
 bot.command('alertas', async (ctx) => {
-  const { dados } = await lerPlanilhaCompleta();
-  const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-  const imediatas = unicas.filter(d=>d._leadTime >= 180).sort((a,b)=>b._leadTime - a._leadTime);
-  if (imediatas.length===0) return ctx.reply('Nenhuma OS >=180d', menu);
-  let txt = `ALERTAS LEAD > 120d: ${unicas.filter(d=>d._leadTime>=120).length} OS\n\nIMEDIATA (>=180d):\n`;
-  imediatas.slice(0,30).forEach(o=> txt+= `OS ${o._os} | ${o._leadTime}d | ${o._setor}\n`);
-  return ctx.reply(txt.substring(0,4096), menu);
+  try {
+    const { dados } = await lerPlanilhaCompleta();
+    const imediatas = dados.filter(d=>d._leadTime >= 180).sort((a,b)=>b._leadTime - a._leadTime);
+    const urgentes = dados.filter(d=>d._leadTime >= 150 && d._leadTime < 180).sort((a,b)=>b._leadTime - a._leadTime);
+    const prioritarias = dados.filter(d=>d._leadTime >= 120 && d._leadTime < 150).sort((a,b)=>b._leadTime - a._leadTime);
+    const total = imediatas.length + urgentes.length + prioritarias.length;
+    if (total === 0) return ctx.reply('Nenhuma OS com mais de 120 dias!', menu);
+    let txt = 'ALERTAS LEAD > 120 DIAS (da planilha): ' + total + ' OS\n';
+    if (imediatas.length) { txt+= '\nIMEDIATA (>=180d): '+imediatas.length+' OS\n'; imediatas.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
+    if (urgentes.length) { txt+= '\nURGENTE (150-179d): '+urgentes.length+' OS\n'; urgentes.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
+    if (prioritarias.length) { txt+= '\nPRIORITARIO (120-149d): '+prioritarias.length+' OS\n'; prioritarias.slice(0,20).forEach(o=> txt+= 'OS '+o['OS']+' | '+o._leadTime+'d | '+o['SETOR']+'\n'); }
+    return ctx.reply(txt.substring(0,4096), menu);
+  } catch(e){ return ctx.reply('Erro nos alertas', menu); }
 });
+
 bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], (ctx) => {
   const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
   esperandoFiltro[ctx.from.id]=mapa[ctx.message.text];
   return ctx.reply('Digite o valor para '+ctx.message.text+':');
 });
+
 bot.on('text', async (ctx) => {
   try {
     const textoOriginal = ctx.message.text.trim(); if (textoOriginal.startsWith('/')) return;
@@ -111,66 +117,43 @@ bot.on('text', async (ctx) => {
     let encontradas = filtroAtivo? dados.filter(d=>(d[filtroAtivo]||'').toLowerCase().includes(texto)) : dados.filter(d=>d._textoBusca.includes(texto));
     delete esperandoFiltro[id];
     if (encontradas.length===0) return ctx.reply('Nada para "'+textoOriginal+'"', menu);
-    if (encontradas.length<=20) {
-      for (const os of encontradas) {
-        let r = `OS ${os._os} | QTD RET: ${os._qtd} ${os._qtd==0?'(PENDENTE)':''}\n`;
-        cabecalho.slice(0,10).forEach(col=>{ r+= `${col}: ${os[col]||'-'}\n`; });
-        await ctx.reply(r.substring(0,4096));
-      }
-      return ctx.reply(`Total: ${encontradas.length} linhas`, menu);
-    } else {
-      return ctx.reply(`${encontradas.length} linhas encontradas para "${textoOriginal}". Use /dashboard para ver completo.`, menu);
+    if (encontradas.length===1) {
+      const os = encontradas[0]; let r = 'FICHA OS '+os['OS']+'\n';
+      cabecalho.forEach(col=>{ if(!col.startsWith('_')) r+= col+': '+(os[col]||'-')+'\n'; });
+      return ctx.reply(r.substring(0,4096), menu);
     }
-  } catch(e){ return ctx.reply('Erro na busca', menu); }
+    await ctx.reply(encontradas.length+' OS encontradas:');
+    for (let i=0; i<encontradas.length; i+=10) {
+      const lote = encontradas.slice(i,i+10); let msg='';
+      lote.forEach(o=>{ msg+= 'OS '+o['OS']+' | COD '+o['CODIGO']+' | '+o._emissaoRaw+' | '+o['SETOR']+' | LEAD '+o._leadTime+'d\n'; });
+      await ctx.reply(msg);
+    }
+    return ctx.reply('Total: '+encontradas.length+' OS', menu);
+  } catch(e){
+    console.error(e);
+    return ctx.reply('Erro na busca', menu);
+  }
 });
 
-// DASHBOARD 2 ABAS
-app.get('/dashboard', async (req,res)=>{
-  try{
-    const { cabecalho, dados } = await lerPlanilhaCompleta();
-    const osUnicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-    const porSetor={}; osUnicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-    const porStatus={}; osUnicas.forEach(d=>{ porStatus[d._status]=(porStatus[d._status]||0)+1; });
-    const a180=osUnicas.filter(d=>d._leadTime>=180).length;
-    const a150=osUnicas.filter(d=>d._leadTime>=150&&d._leadTime<180).length;
-    const a120=osUnicas.filter(d=>d._leadTime>=120&&d._leadTime<150).length;
-    const pendentesTotal = dados.filter(d=>d._qtd==0).length;
-
-    res.send(`
-    <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}.tabs{display:flex;gap:8px;margin-bottom:12px}.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}.tab.active{background:#38bdf8;color:#000;font-weight:bold}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr} input{padding:10px;border-radius:8px;border:none;width:180px} button{padding:10px 16px;border-radius:8px;border:none;background:#38bdf8;font-weight:bold;cursor:pointer;margin-left:6px} table{width:100%;border-collapse:collapse;margin-top:12px} th,td{border:1px solid #334155;padding:6px;font-size:11px;text-align:left}.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}</style>
-    </head><body>
-    <h2>ZROF - ${osUnicas.length} OS / ${dados.length} materiais</h2>
-    <div class="tabs"><div class="tab active" onclick="showTab(1)">📊 Dashboard</div><div class="tab" onclick="showTab(2)">📦 Material Pendente (Qtd.retirada=0)</div></div>
-    <div id="tab1"><div class="grid"><div class="card"><canvas id="c1"></canvas></div><div class="card"><canvas id="c2"></canvas></div><div class="card"><canvas id="c3"></canvas></div><div class="card"><h3>Resumo</h3><p>180d+: ${a180}</p><p>150-179d: ${a150}</p><p>120-149d: ${a120}</p><p>Materiais pendentes (geral): ${pendentesTotal}</p></div></div></div>
-    <div id="tab2" style="display:none"><div class="card"><h3>Consulta por OS - retorna todas as linhas</h3><input id="buscaOS" placeholder="Digite a OS"><button onclick="buscar()">Buscar</button><button onclick="buscarPend()">Só pendentes</button><div id="resultado"></div></div></div>
-    <script>
-      const dados = ${JSON.stringify(dados.slice(0,5000))};
-      const cab = ${JSON.stringify(cabecalho)};
-      function showTab(n){ document.getElementById('tab1').style.display=n==1?'block':'none'; document.getElementById('tab2').style.display=n==2?'block':'none'; document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active', i==n-1)); }
-      new Chart(document.getElementById('c1'),{type:'bar',data:{labels:${JSON.stringify(Object.keys(porSetor))},[STRIPPED]
-      new Chart(document.getElementById('c2'),{type:'doughnut',data:{labels:${JSON.stringify(Object.keys(porStatus))},[STRIPPED]
-      new Chart(document.getElementById('c3'),{type:'bar',data:{labels:['180+',[STRIPPED]
-      function render(lista){
-        if(!lista.length){ document.getElementById('resultado').innerHTML='<p>Nenhuma linha encontrada</p>'; return; }
-        let html='<p>Total: '+lista.length+' materiais | Pendentes: '+lista.filter(d=>d._qtd==0).length+'</p><div style="overflow:auto"><table><tr>'; cab.forEach(h=>html+='<th>'+h+'</th>'); html+='</tr>';
-        lista.forEach(d=>{ const cls=d._qtd==0?'class="pend"':''; html+='<tr '+cls+'>'; cab.forEach(h=>html+='<td>'+(d[h]||'')+'</td>'); html+='</tr>'; }); html+='</table></div>';
-        document.getElementById('resultado').innerHTML=html;
-      }
-      function buscar(){ const os=document.getElementById('buscaOS').value.trim().toLowerCase(); if(!os) return; const filtrados=dados.filter(d=>String(d._os||'').toLowerCase().includes(os)); render(filtrados); }
-      function buscarPend(){ const os=document.getElementById('buscaOS').value.trim().toLowerCase(); if(!os) return; const filtrados=dados.filter(d=>String(d._os||'').toLowerCase().includes(os) && d._qtd==0); render(filtrados); }
-    </script></body></html>`);
-  }catch(e){ res.status(500).send('Erro dashboard: '+e.message); }
-});
-
-app.get('/', (req,res)=>res.send('Bot ZROF online - <a href="/dashboard">Dashboard</a>'));
+app.get('/', (req,res)=>res.send('Bot ZROF online - webhook ativo'));
 app.use(bot.webhookCallback('/telegram'));
 
 app.listen(PORT, async () => {
-  console.log('Web ok porta '+PORT);
+  console.log('Web ok na porta '+PORT);
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
   if (domain) {
-    try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); console.log('Webhook ok'); } catch(e){ console.error(e.message); }
-  } else { bot.launch(); }
+    const webhookUrl = 'https://'+domain+'/telegram';
+    try {
+      await bot.telegram.setWebhook(webhookUrl);
+      console.log('Webhook setado: '+webhookUrl);
+    } catch (e) {
+      console.error('Erro webhook:', e.message);
+    }
+  } else {
+    console.log('Polling local');
+    bot.launch().then(()=>console.log('Bot polling ok'));
+  }
 });
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
