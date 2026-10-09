@@ -1,6 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEET_ID = process.env.SHEET_ID || process.env.GOOGLE_SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
@@ -10,7 +11,7 @@ if (!BOT_TOKEN) { console.log('FALTA BOT_TOKEN'); process.exit(1); }
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-let cachePlanilha = { dados: null, hora: 0 };
+let cache = { dados: null, hora: 0 };
 
 async function parseCSV(text) {
   const rows = []; let cur = '', row = [], inQ = false;
@@ -28,7 +29,7 @@ async function parseCSV(text) {
 }
 
 async function lerPlanilha() {
-  if (cachePlanilha.dados && Date.now() - cachePlanilha.hora < 5*60*1000) return cachePlanilha.dados;
+  if (cache.dados && Date.now() - cache.hora < 300000) return cache.dados;
   let allRows = []; let cab = null; let offset = 0;
   while (true) {
     const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent('SELECT * LIMIT 1000 OFFSET ' + offset);
@@ -46,80 +47,69 @@ async function lerPlanilha() {
   const idxOS = upper.findIndex(h => h === 'OS');
   const idxSetor = upper.findIndex(h => h.includes('SETOR'));
   const idxFam = upper.findIndex(h => h.includes('FAMILIA') || h.includes('FAMÍLIA'));
-  const idxQtd = upper.findIndex(h => h.includes('QTD') && h.includes('RETIRADA'));
-
-  const mapaOS = {};
+  const mapa = {};
   allRows.forEach(cols => {
-    const get = (idx) => (idx>=0? (cols[idx]||'').replace(/^"|"$/g,'').trim() : '');
+    const get = (i) => (i>=0? (cols[i]||'').replace(/^"|"$/g,'').trim() : '');
     const os = get(idxOS); if (!os) return;
-    if (!mapaOS[os]) mapaOS[os] = { _os: os, _setor: get(idxSetor)||'SEM SETOR', _familia: get(idxFam)||'SEM FAMILIA' };
+    if (!mapa[os]) mapa[os] = { _setor: get(idxSetor)||'SEM SETOR', _familia: get(idxFam)||'SEM FAMILIA' };
   });
-  const unicas = Object.values(mapaOS);
+  const unicas = Object.values(mapa);
   const porSetor = {}; unicas.forEach(d => { porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
   const porFamilia = {}; unicas.forEach(d => { porFamilia[d._familia]=(porFamilia[d._familia]||0)+1; });
-  const result = { totalLinhas: allRows.length, osUnicas: unicas.length, porSetor, porFamilia };
-  cachePlanilha = { dados: result, hora: Date.now() };
-  console.log('LIDO ' + result.totalLinhas + ' linhas | ' + result.osUnicas + ' OS');
-  return result;
+  const res = { totalLinhas: allRows.length, osUnicas: unicas.length, porSetor, porFamilia };
+  cache = { dados: res, hora: Date.now() };
+  console.log('LIDO '+res.totalLinhas+' linhas');
+  return res;
 }
 
-// --- BOT ---
-const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
-
-bot.start((ctx) => ctx.reply('Bot ZROF - Online ✅\nUse /dashboard', menu));
-bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
+const menu = Markup.keyboard([['/dashboard']]).resize();
+bot.start((ctx) => ctx.reply('Bot ZROF Online', menu));
 bot.command('dashboard', (ctx) => {
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
   const url = domain? 'https://'+domain+'/dashboard' : '/dashboard';
   return ctx.reply('Dashboard: '+url, menu);
 });
-bot.command('resumo', async (ctx) => {
-  try {
-    const d = await lerPlanilha();
-    return ctx.reply(`OS Unicas: ${d.osUnicas}\nTotal linhas: ${d.totalLinhas}`, menu);
-  } catch(e){ return ctx.reply('Erro ao ler planilha'); }
-});
-bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], (ctx) => ctx.reply('Digite o valor para '+ctx.message.text+':'));
-bot.on('text', async (ctx) => {
-  const txt = ctx.message.text.trim();
-  if (txt.startsWith('/')) return;
-  if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(txt)) return;
-  return ctx.reply(`Recebi: ${txt}\nTotal OS: ${(await lerPlanilha()).osUnicas}`, menu);
-});
+bot.command('limpar', (ctx) => { cache={dados:null,hora:0}; return ctx.reply('Cache limpo'); });
 
-bot.catch((err) => console.log('Erro bot:', err.message));
-
-// --- EXPRESS - ORDEM CORRETA PARA WEBHOOK ---
-app.get('/', (req,res)=>res.send('Bot ZROF online - <a href="/dashboard">Dashboard</a>'));
+app.get('/', (req,res)=>res.send('OK <a href="/dashboard">Dashboard</a>'));
 app.get('/api/resumo', async (req,res)=>{
-  try { res.json(await lerPlanilha()); } catch(e){ res.json({osUnicas:0, porSetor:{}, porFamilia:{}}); }
-});
-app.get('/dashboard', (req,res)=>{
-  const html = [
-'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:16px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head><body>',
-'<h2 id="titulo">Carregando...</h2><div class="grid"><div class="card"><h3>N de Ordens por Setor</h3><canvas id="c1"></canvas></div><div class="card"><h3>N de Ordens por Familia</h3><canvas id="c2"></canvas></div></div>',
-'<script>fetch("/api/resumo").then(r=>r.json()).then(d=>{document.getElementById("titulo").innerText="ZROF - "+d.osUnicas+" OS / "+d.totalLinhas+" linhas";new Chart(document.getElementById("c1"),{type:"bar",data:{labels:Object.keys(d.porSetor),[STRIPPED]
-'new Chart(document.getElementById("c2"),{type:"bar",data:{labels:Object.keys(d.porFamilia),[STRIPPED]
-'</script></body></html>'
-  ].join(''); res.send(html);
+  try { const d = await lerPlanilha(); res.json(d); } catch(e){ res.json({osUnicas:0,totalLinhas:0,porSetor:{},porFamilia:{}}); }
 });
 
-// IMPORTANTE: webhook SEM express.json() antes
+app.get('/dashboard', (req,res)=>{
+  res.sendFile(__dirname + '/dash.html');
+});
+
+const dashHtml = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:16px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style>
+</head><body>
+<h2 id="titulo">Carregando ZROF...</h2>
+<div class="grid">
+<div class="card"><h3>N de Ordens por Setor</h3><canvas id="c1"></canvas></div>
+<div class="card"><h3>N de Ordens por Familia</h3><canvas id="c2"></canvas></div>
+</div>
+<div class="card" id="res"></div>
+<script>
+fetch("/api/resumo").then(r=>r.json()).then(d=>{
+  document.getElementById("titulo").innerText = "ZROF - " + d.osUnicas + " OS / " + d.totalLinhas + " linhas";
+  document.getElementById("res").innerText = "Dados carregados";
+  new Chart(document.getElementById("c1"),{type:"bar",data:{labels:Object.keys(d.porSetor),datasets:[{label:"Ordens",data:Object.values(d.porSetor),backgroundColor:"#38bdf8"}]}});
+  new Chart(document.getElementById("c2"),{type:"bar",data:{labels:Object.keys(d.porFamilia),datasets:[{label:"Ordens",data:Object.values(d.porFamilia),backgroundColor:"#a78bfa"}]}});
+});
+</script>
+</body></html>
+`;
+fs.writeFileSync(__dirname + '/dash.html', dashHtml);
+
 app.use(bot.webhookCallback('/telegram'));
 
 app.listen(PORT, async () => {
   console.log('Porta '+PORT);
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
   if (domain) {
-    const webhookUrl = 'https://'+domain+'/telegram';
-    try {
-      await bot.telegram.setWebhook(webhookUrl);
-      console.log('Webhook SETADO: '+webhookUrl);
-      const info = await bot.telegram.getWebhookInfo();
-      console.log('Webhook info:', info.url, ' pendentes:', info.pending_update_count);
-    } catch(e){ console.log('Erro webhook:', e.message); }
-  } else {
-    console.log('Sem RENDER_EXTERNAL_HOSTNAME - usando polling');
-    bot.launch();
-  }
+    try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); console.log('webhook ok'); } catch(e){ console.log(e.message); }
+  } else { bot.launch(); console.log('polling'); }
 });
