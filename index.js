@@ -80,36 +80,12 @@ async function lerPlanilhaCompleta() {
 
 const menu = Markup.keyboard([['OS','CÓDIGO','FAMÍLIA'],['SETOR','STATUS','/resumo'],['/alertas','/dashboard']]).resize();
 bot.start((ctx) => ctx.reply('Bot ZROF - Online', menu));
-bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
 bot.command('dashboard', (ctx) => {
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
   const url = domain? 'https://'+domain+'/dashboard' : '/dashboard';
   return ctx.reply('Dashboard: '+url, menu);
 });
-bot.command('resumo', async (ctx) => {
-  const { dados } = await lerPlanilhaCompleta();
-  const unicas = [...new Map(dados.map(d=>[d._os,d])).values()];
-  return ctx.reply('OS unicas: '+unicas.length+' | Materiais: '+dados.length, menu);
-});
-bot.on('text', async (ctx) => {
-  const txt = ctx.message.text.trim();
-  if (txt.startsWith('/')) return;
-  if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(txt)) {
-    const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
-    esperandoFiltro[ctx.from.id]=mapa[txt];
-    return ctx.reply('Digite valor para '+txt+':');
-  }
-  const busca = txt.toLowerCase();
-  const { dados } = await lerPlanilhaCompleta();
-  const filtro = esperandoFiltro[ctx.from.id];
-  let ach = filtro? dados.filter(d=>(d[filtro]||'').toLowerCase().includes(busca)) : dados.filter(d=>d._busca.includes(busca));
-  delete esperandoFiltro[ctx.from.id];
-  if (!ach.length) return ctx.reply('Nada para "'+txt+'"', menu);
-  for (let i=0;i<Math.min(ach.length,10);i++){
-    await ctx.reply('OS '+ach[i]._os+' | SETOR '+ach[i]._setor+' | FAM '+ach[i]._familia+' | QTD '+ach[i]._qtd);
-  }
-  return ctx.reply('Total: '+ach.length, menu);
-});
+bot.command('limpar', (ctx) => { cachePlanilha={dados:null,hora:0}; return ctx.reply('Cache limpo!', menu); });
 
 app.get('/api/dados', async (req,res)=>{
   try{
@@ -119,84 +95,74 @@ app.get('/api/dados', async (req,res)=>{
 });
 
 app.get('/dashboard', (req,res)=>{
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}
-.tabs{display:flex;gap:8px;margin-bottom:12px}
-.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}
-.tab.active{background:#38bdf8;color:#000;font-weight:bold}
-.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}
-.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
-table{width:100%;border-collapse:collapse;margin-top:12px}
-th,td{border:1px solid #334155;padding:6px;font-size:11px}
-.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}
-input,button{padding:10px;border-radius:8px;border:none}
-button{background:#38bdf8;font-weight:bold;margin-left:6px}
-input{width:180px}
-</style></head><body>
-<h2 id="titulo">Carregando...</h2>
-<div class="tabs">
-<div class="tab active" id="t1" onclick="showTab(1)">N Ordens por Setor e Familia</div>
-<div class="tab" id="t2" onclick="showTab(2)">Material Pendente</div>
-</div>
-<div id="tab1">
-<div class="grid">
-<div class="card"><h3>N de Ordens por Setor</h3><canvas id="cSetor"></canvas></div>
-<div class="card"><h3>N de Ordens por Familia</h3><canvas id="cFamilia"></canvas></div>
-</div>
-<div class="card" id="resumo"></div>
-</div>
-<div id="tab2" style="display:none">
-<div class="card"><h3>Consulta OS</h3>
-<input id="buscaOS" placeholder="Digite a OS">
-<button onclick="buscar()">Buscar</button>
-<button onclick="buscarPend()">So Pendentes</button>
-<div id="resultado"></div>
-</div>
-</div>
-<script>
-let dadosGlobais=[];
-let cabGlobais=[];
-function showTab(n){
-document.getElementById('tab1').style.display=n==1?'block':'none';
-document.getElementById('tab2').style.display=n==2?'block':'none';
-document.getElementById('t1').className=n==1?'tab active':'tab';
-document.getElementById('t2').className=n==2?'tab active':'tab';
-}
-function render(lista){
-if(!lista.length){document.getElementById('resultado').innerHTML='<p>Nada</p>';return;}
-let h='<p>'+lista.length+' linhas | Pend: '+lista.filter(function(d){return d._qtd==0}).length+'</p><div style="overflow:auto"><table><tr>';
-cabGlobais.forEach(function(c){h+='<th>'+c+'</th>'});
-h+='</tr>';
-lista.forEach(function(d){
-let cls=d._qtd==0?'pend':'';
-h+='<tr class="'+cls+'">';
-cabGlobais.forEach(function(c){h+='<td>'+(d[c]||'')+'</td>'});
-h+='</tr>';
-});
-h+='</table></div>';
-document.getElementById('resultado').innerHTML=h;
-}
-function buscar(){
-let os=document.getElementById('buscaOS').value.trim().toLowerCase();
-if(!os)return;
-render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os)}));
-}
-function buscarPend(){
-let os=document.getElementById('buscaOS').value.trim().toLowerCase();
-if(!os)return;
-render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os) && d._qtd==0}));
-}
-fetch('/api/dados').then(function(r){return r.json()}).then(function(j){
-dadosGlobais=j.dados; cabGlobais=j.cabecalho;
-let mapa={};
-dadosGlobais.forEach(function(d){mapa[d._os]=d});
-let unicas=Object.values(mapa);
-let porSetor={}; unicas.forEach(function(d){porSetor[d._setor]=(porSetor[d._setor]||0)+1});
-let porFamilia={}; unicas.forEach(function(d){porFamilia[d._familia]=(porFamilia[d._familia]||0)+1});
-document.getElementById('titulo').innerText='ZROF - '+unicas.length+' OS / '+dadosGlobais.length+' materiais';
-document.getElementById('resumo').innerText='Total OS: '+unicas.length+' | Pendentes: '+dadosGlobais.filter(function(d){return d._qtd==0}).length;
-new Chart(document.getElementById('cSetor'),{type:'bar',data:{labels:Object.keys(porSetor),datasets:[{label:'Ordens',data:Object.values(porSet
+  const parts = [
+'<!DOCTYPE html>',
+'<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
+'<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>',
+'<style>',
+'body{font-family:system-ui;background:#0f172a;color:#fff;padding:12px}',
+'.tabs{display:flex;gap:8px;margin-bottom:12px}',
+'.tab{padding:10px 16px;background:#1e293b;border-radius:12px;cursor:pointer}',
+'.tab.active{background:#38bdf8;color:#000;font-weight:bold}',
+'.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}',
+'.grid{display:grid;gap:12px;grid-template-columns:1fr 1fr}',
+'@media(max-width:900px){.grid{grid-template-columns:1fr}}',
+'table{width:100%;border-collapse:collapse;margin-top:12px}',
+'th,td{border:1px solid #334155;padding:6px;font-size:11px}',
+'.pend{background:#7f1d1d;color:#fecaca;font-weight:bold}',
+'input,button{padding:10px;border-radius:8px;border:none}',
+'button{background:#38bdf8;font-weight:bold;margin-left:6px}',
+'input{width:180px}',
+'</style></head><body>',
+'<h2 id="titulo">Carregando...</h2>',
+'<div class="tabs">',
+'<div class="tab active" id="t1" onclick="showTab(1)">N Ordens por Setor e Familia</div>',
+'<div class="tab" id="t2" onclick="showTab(2)">Material Pendente</div>',
+'</div>',
+'<div id="tab1">',
+'<div class="grid">',
+'<div class="card"><h3>N de Ordens por Setor</h3><canvas id="cSetor"></canvas></div>',
+'<div class="card"><h3>N de Ordens por Familia</h3><canvas id="cFamilia"></canvas></div>',
+'</div>',
+'<div class="card" id="resumo"></div>',
+'</div>',
+'<div id="tab2" style="display:none">',
+'<div class="card"><h3>Consulta OS</h3>',
+'<input id="buscaOS" placeholder="Digite a OS">',
+'<button onclick="buscar()">Buscar</button>',
+'<button onclick="buscarPend()">So Pendentes</button>',
+'<div id="resultado"></div>',
+'</div></div>',
+'<script>',
+'let dadosGlobais=[]; let cabGlobais=[];',
+'function showTab(n){',
+'document.getElementById("tab1").style.display=n==1?"block":"none";',
+'document.getElementById("tab2").style.display=n==2?"block":"none";',
+'document.getElementById("t1").className=n==1?"tab active":"tab";',
+'document.getElementById("t2").className=n==2?"tab active":"tab";',
+'}',
+'function render(lista){',
+'if(!lista.length){document.getElementById("resultado").innerHTML="<p>Nada</p>";return;}',
+'let h="<p>"+lista.length+" linhas | Pend: "+lista.filter(function(d){return d._qtd==0}).length+"</p><div style=overflow:auto><table><tr>";',
+'cabGlobais.forEach(function(c){h+="<th>"+c+"</th>"});',
+'h+="</tr>";',
+'lista.forEach(function(d){',
+'let cls=d._qtd==0?"pend":"";',
+'h+="<tr class="+cls+">";',
+'cabGlobais.forEach(function(c){h+="<td>"+(d[c]||"")+"</td>"});',
+'h+="</tr>";',
+'});',
+'h+="</table></div>";',
+'document.getElementById("resultado").innerHTML=h;',
+'}',
+'function buscar(){',
+'let os=document.getElementById("buscaOS").value.trim().toLowerCase();',
+'if(!os)return;',
+'render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os)}));',
+'}',
+'function buscarPend(){',
+'let os=document.getElementById("buscaOS").value.trim().toLowerCase();',
+'if(!os)return;',
+'render(dadosGlobais.filter(function(d){return String(d._os).toLowerCase().includes(os) && d._qtd==0}));',
+'}',
+'
