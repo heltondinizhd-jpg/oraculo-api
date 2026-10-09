@@ -86,7 +86,7 @@ if(BOT_TOKEN && Telegraf){
   app.use(bot.webhookCallback(WEBHOOK_PATH));
 }
 
-app.get('/',(req,res)=>res.send('OK V13 FIX GRAFICOS '+new Date().toISOString()+' <a href="/dashboard">Dashboard</a>'));
+app.get('/',(req,res)=>res.send('OK V13.4 '+new Date().toISOString()+' <a href="/dashboard">Dashboard</a>'));
 app.get('/ping',(req,res)=>res.send('pong '+Date.now()));
 app.get('/api/resumo', async (req,res)=>{
   try{
@@ -100,7 +100,7 @@ app.get('/dashboard', async (req,res)=>{
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}.big{font-size:26px;font-weight:800}.label{opacity:.7;font-size:12px}@media(max-width:800px){.grid,.kpis{grid-template-columns:1fr}}</style></head><body>
-<h2>ZROF Dashboard V13 - GRAFICOS FIX</h2>
+<h2>ZROF Dashboard V13.4 - FIX</h2>
 <div class="kpis">
 <div class="card"><div class="label">Total de ordens</div><div class="big" id="tOrd">...</div></div>
 <div class="card"><div class="label">Ordens Mina</div><div class="big" id="tMina">...</div></div>
@@ -156,7 +156,7 @@ app.listen(PORT, function(){
 if(bot){
   const menu=Markup.keyboard([['Buscar OS','Materiais OS'],['Resumo','Dashboard'],['Limpar']]).resize();
   bot.catch((err,ctx)=>{ console.log('BOT ERRO',err.message); });
-  bot.start((ctx)=>ctx.reply('ZROF Online V13 FIX GRAFICOS',menu));
+  bot.start((ctx)=>ctx.reply('ZROF V13.4 Online - FIX SEM EMOJI',menu));
   bot.hears('Resumo', async (ctx)=>{
     try{
       const d=await lerPlanilha(); const mm=await lerMateriais();
@@ -165,4 +165,53 @@ if(bot){
       const percMina=d.totalOrdens?Math.round(d.totalMina/d.totalOrdens*100):0;
       const percUsina=d.totalOrdens?Math.round(d.totalUsina/d.totalOrdens*100):0;
       const percRet=mm.total?Math.round(retirados/mm.total*100):0;
-      let txt='📊 RESUMO ZROF\n🕒 '+agora+'\n━━━━━━━━━━━━━━━━━━━━\n\n📋 ORDENS\nTotal de ordens: '+d.totalOrdens+'\nOrdens Mina: '+d.totalMina+' ('+percMina+'%)\nOrdens Usina: '+d.totalUsina+' ('+percUsina+'%)\n\n📦 MATERIAIS BD_MAT\nMateriais pendentes: '+mm.totalPend+'/'+mm.total+'\nMateriais retirados: '+retirados+'/'+mm.total+' ('+percRet+'% concluido)\n\n🔗 Dashboard: https://'+(process.env.RENDER_EXTERNAL_HOSTNAME||'seu-app')
+      let txt='';
+      txt+='RESUMO ZROF\n';
+      txt+=agora+'\n';
+      txt+='--------------------\n\n';
+      txt+='ORDENS\n';
+      txt+='Total de ordens: '+d.totalOrdens+'\n';
+      txt+='Ordens Mina: '+d.totalMina+' ('+percMina+'%)\n';
+      txt+='Ordens Usina: '+d.totalUsina+' ('+percUsina+'%)\n\n';
+      txt+='MATERIAIS BD_MAT\n';
+      txt+='Materiais pendentes: '+mm.totalPend+'/'+mm.total+'\n';
+      txt+='Materiais retirados: '+retirados+'/'+mm.total+' ('+percRet+'% concluido)\n\n';
+      txt+='Dashboard: https://'+(process.env.RENDER_EXTERNAL_HOSTNAME||'seu-app')+'/dashboard';
+      await ctx.reply(txt,menu);
+    }catch(e){ ctx.reply('Erro '+e.message,menu); }
+  });
+  bot.hears('Dashboard',(ctx)=>{ const dom=process.env.RENDER_EXTERNAL_HOSTNAME; const url=dom?'https://'+dom+'/dashboard':'/dashboard'; ctx.reply('Dashboard: '+url,menu); });
+  bot.hears('Limpar', async (ctx)=>{ cache={dados:null,hora:0}; cacheMat={dados:null,hora:0}; await ctx.reply('Limpando cache...',menu); const d=await lerPlanilha(); const mm=await lerMateriais(); ctx.reply('Pronto! Total de ordens: '+d.totalOrdens+' Mina: '+d.totalMina+' Usina: '+d.totalUsina+' Pend: '+mm.totalPend+'/'+mm.total,menu); });
+  bot.hears('Buscar OS',(ctx)=>{ estado[ctx.from.id]='BUSCA'; ctx.reply('Digite OS:',menu); });
+  bot.hears('Materiais OS',(ctx)=>{ estado[ctx.from.id]='MAT'; ctx.reply('Digite OS pendentes ex 25291524:',menu); });
+  bot.on('text', async (ctx)=>{
+    try{
+      const t=ctx.message.text.trim(); if(['Buscar OS','Materiais OS','Resumo','Dashboard','Limpar'].includes(t)||t.startsWith('/')) return;
+      const d=await lerPlanilha(); const m=await lerMateriais();
+      if(estado[ctx.from.id]==='MAT'){
+        estado[ctx.from.id]=null;
+        const os=t.replace(/\D/g,''); const todos=m.porOS[os]||[]; const pend=m.porOSPend[os]||[];
+        if(!todos.length) return ctx.reply('Nada BD_MAT para OS '+os,menu);
+        if(!pend.length) return ctx.reply('OS '+os+' SEM PENDENCIAS! '+todos.length+' ja retirados.',menu);
+        let txt='PENDENTES OS '+os+' ('+pend.length+' de '+todos.length+')\n\n'; pend.forEach(function(x,i){ txt+=(i+1)+') Mat:'+x.material+' '+x.txt+'\nNec:'+x.nec+' Ret:'+x.ret+'\n\n'; });
+        for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu); return;
+      }
+      const ach=d.dadosFull.filter(function(x){ return x._busca.includes(t.toLowerCase()); });
+      if(!ach.length) return ctx.reply('Nada para '+t,menu);
+      for(const it of ach.slice(0,3)){
+        let det='OS:'+it._os+' Macro:'+it._macro+'\nSetor:'+it._setor+'\n';
+        for(const kv of Object.entries(it._row)){ if(kv[1]) det+=kv[0]+': '+kv[1]+'\n'; }
+        const qTot=m.porOS[it._os]?.length||0; const qPend=m.porOSPend[it._os]?.length||0;
+        det+='\nBD_MAT total '+qTot+' pend '+qPend;
+        if(qPend>0) await ctx.reply(det.substring(0,3900), Markup.inlineKeyboard([[Markup.button.callback('Ver '+qPend+' pend','pend:'+it._os)]]));
+        else await ctx.reply(det.substring(0,4000),menu);
+      }
+    }catch(e){ console.log('on text erro',e.message); }
+  });
+  bot.action(/pend:(.+)/, async (ctx)=>{
+    try{ await ctx.answerCbQuery(); const os=ctx.match[1]; const mm=await lerMateriais(); const pend=mm.porOSPend[os]||[]; let txt='PENDENTES OS '+os+' ('+pend.length+')\n\n'; pend.forEach(function(x,i){ txt+=(i+1)+') '+x.material+' '+x.txt+'\nNec:'+x.nec+' Ret:'+x.ret+'\n\n'; }); for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000)); }catch(e){}
+  });
+}
+
+process.on('unhandledRejection', function(r){ console.log('unhandled',r); });
+process.on('uncaughtException', function(e){ console.log('uncaught',e.message); });
