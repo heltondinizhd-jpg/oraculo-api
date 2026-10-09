@@ -11,72 +11,79 @@ if (!BOT_TOKEN) process.exit(1);
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-let cache = { dados: null, hora: 0 };
+let cache = { dados: null, hora: 0, carregando: false };
 
-async function parseCSV(text) {
-  const rows = []; let cur = '', row = [], inQ = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]; const n = text[i+1];
-    if (c === '"') { if (inQ && n === '"') { cur += '"'; i++; } else inQ=!inQ; }
-    else if (c === ',' &&!inQ) { row.push(cur); cur = ''; }
-    else if ((c === '\n' || c === '\r') &&!inQ) {
-      if (cur || row.length) { row.push(cur); rows.push(row); row=[]; cur=''; }
-      if (c === '\r' && n === '\n') i++;
-    } else cur += c;
-  }
-  if (cur || row.length) { row.push(cur); rows.push(row); }
-  return rows.filter(r => r.join('').trim()!=='');
-}
-
+// CSV DIRETO - MUITO MAIS RAPIDO QUE GVIZ
 async function lerPlanilha() {
-  if (cache.dados && Date.now() - cache.hora < 300000) return cache.dados;
-  let allRows = []; let cab = null; let offset = 0;
-  while (true) {
-    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent('SELECT * LIMIT 1000 OFFSET ' + offset);
-    try {
-      const r = await axios.get(url, { responseType: 'text', timeout: 15000 });
-      const rows = await parseCSV(r.data);
-      if (!rows.length) break;
-      if (!cab) { cab = rows[0].map(h=>h.replace(/"/g,'').trim()); allRows.push(...rows.slice(1)); }
-      else allRows.push(...rows);
-      if (rows.length < 1000) break;
-      offset += 1000; if (offset > 15000) break;
-    } catch(e){ break; }
+  if (cache.dados && Date.now() - cache.hora < 5*60*1000) return cache.dados;
+  if (cache.carregando) {
+    // se já está carregando, espera o cache ficar pronto
+    await new Promise(r=>setTimeout(r,2000));
+    if (cache.dados) return cache.dados;
   }
-  const upper = cab.map(h=>h.toUpperCase());
-  const idxOS = upper.findIndex(h=>h==='OS');
-  const idxSetor = upper.findIndex(h=>h.includes('SETOR'));
-  const idxFam = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
-  const idxQtd = upper.findIndex(h=>h.includes('QTD') && h.includes('RETIRADA'));
-  const idxLead = upper.findIndex(h=>h.includes('LEAD'));
+  cache.carregando = true;
+  try {
+    // TENTA EXPORT DIRETO (1 requisicao só)
+    let csvText = '';
+    try {
+      const urlExport = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv';
+      const r = await axios.get(urlExport, { responseType: 'text', timeout: 20000 });
+      csvText = r.data;
+    } catch (e) {
+      // fallback gviz se export estiver bloqueado
+      const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&tq=' + encodeURIComponent('SELECT *');
+      const r = await axios.get(url, { responseType: 'text', timeout: 20000 });
+      csvText = r.data;
+    }
 
-  const dadosFull = allRows.map(cols=>{
-    const get = (i)=> i>=0? (cols[i]||'').replace(/^"|"$/g,'').trim() : '';
-    return {
-      _os: get(idxOS),
-      _setor: get(idxSetor)||'SEM SETOR',
-      _familia: get(idxFam)||'SEM FAMILIA',
-      _qtd: idxQtd>=0? parseFloat(get(idxQtd).replace(',','.'))||0 : 0,
-      _lead: idxLead>=0? parseInt(get(idxLead))||0 : 0,
-      _linha: cab.reduce((o,h,i)=>{ o[h]=get(i); return o; },{}),
-      _busca: cols.join(' ').toLowerCase()
-    };
-  }).filter(d=>d._os);
+    const linhas = csvText.split(/\r?\n/).filter(l=>l.trim());
+    const cab = linhas[0].split(',').map(s=>s.replace(/^"|"$/g,'').trim());
+    const upper = cab.map(h=>h.toUpperCase());
+    const idxOS = upper.findIndex(h=>h==='OS');
+    const idxSetor = upper.findIndex(h=>h.includes('SETOR'));
+    const idxFam = upper.findIndex(h=>h.includes('FAMILIA') || h.includes('FAMÍLIA'));
 
-  const mapa = {}; dadosFull.forEach(d=>{ if(!mapa[d._os]) mapa[d._os]=d; });
-  const unicas = Object.values(mapa);
-  const porSetor = {}; unicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
-  const porFamilia = {}; unicas.forEach(d=>{ porFamilia[d._familia]=(porFamilia[d._familia]||0)+1; });
+    const dadosFull = [];
+    const mapa = {};
 
-  const result = { cab, totalLinhas: allRows.length, osUnicas: unicas.length, porSetor, porFamilia, dadosFull, unicas };
-  cache = { dados: result, hora: Date.now() };
-  console.log('LIDO '+result.totalLinhas+' linhas | '+result.osUnicas+' OS');
-  return result;
+    for (let i=1;i<linhas.length;i++){
+      const linha = linhas[i];
+      // parse simples respeitando aspas
+      const cols = []; let cur='', inQ=false;
+      for (let j=0;j<linha.length;j++){
+        const c = linha[j];
+        if (c==='"'){ inQ=!inQ; }
+        else if (c===',' &&!inQ){ cols.push(cur); cur=''; }
+        else cur+=c;
+      }
+      cols.push(cur);
+      const get = (idx)=> idx>=0? (cols[idx]||'').replace(/^"|"$/g,'').trim() : '';
+      const os = get(idxOS); if(!os) continue;
+      const setor = get(idxSetor)||'SEM SETOR';
+      const fam = get(idxFam)||'SEM FAMILIA';
+      dadosFull.push({ _os: os, _setor: setor, _familia: fam, _busca: linha.toLowerCase(), _linha: cab.reduce((o,h,k)=>{o[h]=get(k); return o;},{}) });
+      if (!mapa[os]) mapa[os] = { _setor: setor, _familia: fam };
+    }
+
+    const unicas = Object.values(mapa);
+    const porSetor = {}; unicas.forEach(d=>{ porSetor[d._setor]=(porSetor[d._setor]||0)+1; });
+    const porFamilia = {}; unicas.forEach(d=>{ porFamilia[d._familia]=(porFamilia[d._familia]||0)+1; });
+
+    const result = { cab, totalLinhas: dadosFull.length, osUnicas: unicas.length, porSetor, porFamilia, dadosFull };
+    cache = { dados: result, hora: Date.now(), carregando: false };
+    console.log('LIDO TURBO '+result.totalLinhas+' linhas em '+(Date.now()-cache.hora)+'ms');
+    return result;
+  } catch (e) {
+    console.log('Erro ler', e.message);
+    cache.carregando = false;
+    return cache.dados || { cab:[], totalLinhas:0, osUnicas:0, porSetor:{}, porFamilia:{}, dadosFull:[] };
+  }
 }
 
-// --- BOT ---
-const menu = Markup.keyboard([['OS','CÓDIGO'],['/dashboard','/resumo']]).resize();
+// PRE-AQUECE O CACHE QUANDO SOBE
+lerPlanilha().then(()=>console.log('Cache aquecido'));
 
+const menu = Markup.keyboard([['/dashboard','/resumo']]).resize();
 bot.start((ctx)=>ctx.reply('Bot ZROF Online - digite a OS', menu));
 bot.command('dashboard', (ctx)=>{
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
@@ -85,50 +92,31 @@ bot.command('dashboard', (ctx)=>{
 });
 bot.command('resumo', async (ctx)=>{
   const d = await lerPlanilha();
-  let txt = `RESUMO\nOS unicas: ${d.osUnicas}\nLinhas: ${d.totalLinhas}\n\nPor Setor:\n`;
-  Object.entries(d.porSetor).forEach(([k,v])=> txt+= `${k}: ${v}\n`);
-  return ctx.reply(txt.substring(0,4000), menu);
+  return ctx.reply(`OS: ${d.osUnicas} | Linhas: ${d.totalLinhas}`, menu);
 });
-bot.command('limpar', (ctx)=>{ cache={dados:null,hora:0}; return ctx.reply('Cache limpo'); });
+bot.command('limpar', (ctx)=>{ cache={dados:null,hora:0,carregando:false}; lerPlanilha(); return ctx.reply('Cache limpo, recarregando...'); });
 
-// BUSCA DE OS - ESSA PARTE QUE FALTAVA
 bot.on('text', async (ctx)=>{
   const texto = ctx.message.text.trim();
   if (texto.startsWith('/')) return;
-  if (['OS','CÓDIGO','/dashboard','/resumo'].includes(texto)) {
-    return ctx.reply('Digite o numero da OS:');
-  }
+  if (texto.length < 2) return;
   try {
     const busca = texto.toLowerCase();
-    const { dadosFull, cab } = await lerPlanilha();
-    const achadas = dadosFull.filter(d=> d._busca.includes(busca) );
-
-    if (!achadas.length) return ctx.reply(`Nada encontrado para "${texto}"`, menu);
-
-    if (achadas.length > 20) {
-      return ctx.reply(`${achadas.length} linhas encontradas para "${texto}". Refine a busca ou veja no /dashboard`, menu);
+    const { dadosFull } = await lerPlanilha();
+    const achadas = dadosFull.filter(d=>d._busca.includes(busca));
+    if (!achadas.length) return ctx.reply(`Nada para "${texto}"`, menu);
+    if (achadas.length > 15) return ctx.reply(`${achadas.length} linhas para "${texto}" - seja mais especifico ou use /dashboard`, menu);
+    for (const d of achadas.slice(0,10)){
+      await ctx.reply(`OS ${d._os} | SETOR ${d._setor} | FAM ${d._familia}`);
     }
-
-    for (let i=0;i<achadas.length;i++){
-      const d = achadas[i];
-      const pend = d._qtd==0? ' (PENDENTE)' : '';
-      let r = `OS ${d._os} | SETOR ${d._setor} | FAM ${d._familia} | QTD ${d._qtd}${pend} | LEAD ${d._lead}d\n`;
-      // manda as 8 primeiras colunas da planilha
-      const chaves = cab.slice(0,8);
-      chaves.forEach(c=>{ r+= `${c}: ${d._linha[c]||'-'}\n`; });
-      await ctx.reply(r.substring(0,4000));
-    }
-    return ctx.reply(`Total: ${achadas.length} materiais`, menu);
-  } catch(e){
-    console.log('Erro busca', e.message);
-    return ctx.reply('Erro ao buscar na planilha');
-  }
+    return ctx.reply(`Total: ${achadas.length}`, menu);
+  } catch(e){ return ctx.reply('Erro busca'); }
 });
 
-// --- WEB ---
 app.get('/', (req,res)=>res.send('OK <a href="/dashboard">Dashboard</a>'));
 app.get('/api/resumo', async (req,res)=>{
-  try { const d = await lerPlanilha(); res.json(d); } catch(e){ res.json({osUnicas:0,totalLinhas:0,porSetor:{},porFamilia:{}}); }
+  const d = await lerPlanilha();
+  res.json(d);
 });
 app.get('/dashboard', (req,res)=>res.sendFile(__dirname + '/dash.html'));
 
@@ -136,21 +124,29 @@ const dashHtml = `
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:16px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style>
+<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:16px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}}#loading{color:#38bdf8}</style>
 </head><body>
-<h2 id="titulo">Carregando ZROF...</h2>
+<h2 id="titulo">ZROF - <span id="loading">Carregando...</span></h2>
 <div class="grid">
 <div class="card"><h3>N de Ordens por Setor</h3><canvas id="c1"></canvas></div>
 <div class="card"><h3>N de Ordens por Familia</h3><canvas id="c2"></canvas></div>
 </div>
-<div class="card" id="res"></div>
+<div class="card" id="res">Aguarde...</div>
 <script>
-fetch("/api/resumo").then(r=>r.json()).then(d=>{
-  document.getElementById("titulo").innerText = "ZROF - " + d.osUnicas + " OS / " + d.totalLinhas + " linhas";
-  document.getElementById("res").innerText = "Total OS unicas: " + d.osUnicas;
-  new Chart(document.getElementById("c1"),{type:"bar",data:{labels:Object.keys(d.porSetor),[STRIPPED]
-  new Chart(document.getElementById("c2"),{type:"bar",data:{labels:Object.keys(d.porFamilia),[STRIPPED]
-});
+async function load(){
+  try{
+    const r = await fetch("/api/resumo");
+    const d = await r.json();
+    document.getElementById("titulo").innerText = "ZROF - " + d.osUnicas + " OS / " + d.totalLinhas + " linhas";
+    document.getElementById("res").innerText = "Atualizado - " + new Date().toLocaleString();
+    document.getElementById("loading").innerText = "";
+    new Chart(document.getElementById("c1"),{type:"bar",data:{labels:Object.keys(d.porSetor),[STRIPPED]
+    new Chart(document.getElementById("c2"),{type:"bar",data:{labels:Object.keys(d.porFamilia),[STRIPPED]
+  }catch(e){
+    document.getElementById("titulo").innerText = "Erro ao carregar, recarregue a pagina";
+  }
+}
+load();
 </script>
 </body></html>
 `;
@@ -161,7 +157,6 @@ app.use(bot.webhookCallback('/telegram'));
 app.listen(PORT, async ()=>{
   console.log('Porta '+PORT);
   const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  if (domain) {
-    try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); console.log('webhook ok'); } catch(e){ console.log(e.message); }
-  } else { bot.launch(); console.log('polling'); }
+  if (domain) { try { await bot.telegram.setWebhook('https://'+domain+'/telegram'); console.log('webhook ok'); } catch(e){ console.log(e.message); } }
+  else { bot.launch(); }
 });
