@@ -52,18 +52,43 @@ async function lerPlanilhaCompleta() {
       break;
     }
   }
+  // === ALTERAÇÃO AQUI: LÊ LEAD TIME DIRETO DA PLANILHA ===
   const idxEmissao = cabecalho? cabecalho.findIndex(h => h.includes('EMISS')) : -1;
-  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  const idxLead = cabecalho? cabecalho.findIndex(h => h.includes('LEAD')) : -1;
+  // =======================================================
   const dados = allDataRows.map(cols => {
     let obj = {}; cabecalho.forEach((h, idx) => obj[h] = (cols[idx] || '').replace(/^"|"$/g,'').trim());
     const emissaoStr = idxEmissao >=0? (cols[idxEmissao]||'') : '';
-    let lead = 0; const m = emissaoStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-    if (m) { let d=parseInt(m[1]), mo=parseInt(m[2])-1, a=parseInt(m[3]); if(a<100) a+=2000; const dt=new Date(a,mo,d); dt.setHours(0,0,0,0); if(!isNaN(dt)) lead=Math.floor((hoje-dt)/(1000*60*60*24)); }
-    obj._leadTime=lead; obj._emissaoRaw=emissaoStr; obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
+
+    // NOVO: pega LEAD da coluna LEAD TIME
+    let lead = 0;
+    if (idxLead >= 0) {
+      const rawLead = (cols[idxLead] || '').replace(/^"|"$/g,'').trim();
+      // pega só número, ex: "180", "180 dias", "180,00"
+      const num = parseInt(String(rawLead).replace(/[^0-9\-]/g,''));
+      if (!isNaN(num)) lead = num;
+    } else {
+      // fallback antigo se não achar coluna LEAD (não deve usar)
+      const m = emissaoStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+      if (m) {
+        let d=parseInt(m[1]), mo=parseInt(m[2])-1, a=parseInt(m[3]);
+        if(a<100) a+=2000;
+        const dt=new Date(a,mo,d);
+        dt.setHours(0,0,0,0);
+        if(!isNaN(dt)) {
+          const hoje = new Date(); hoje.setHours(0,0,0,0);
+          lead=Math.floor((hoje-dt)/(1000*60*60*24));
+        }
+      }
+    }
+
+    obj._leadTime=lead;
+    obj._emissaoRaw=emissaoStr;
+    obj._textoBusca=Object.values(obj).join(' ').toLowerCase();
     return obj;
   }).filter(o=>o['OS']);
   const res = { cabecalho, dados }; cachePlanilha={ dados: res, hora: Date.now() };
-  console.log(`TOTAL LIDO: ${dados.length} OS`);
+  console.log(`TOTAL LIDO: ${dados.length} OS | LEAD da coluna planilha`);
   return res;
 }
 
@@ -94,77 +119,4 @@ bot.command('alertas', async (ctx) => {
     const total = imediatas.length + urgentes.length + prioritarias.length;
     if (total === 0) return ctx.reply('✅ Nenhuma OS com mais de 120 dias!', menu);
     let txt = `🚨 ALERTAS LEAD > 120 DIAS: ${total} OS\n━━━━━━━━━━━━\n`;
-    if (imediatas.length) { txt+= `\n🔴 IMEDIATA (>=180d): ${imediatas.length} OS\n`; imediatas.slice(0,20).forEach(o=> txt+= `• OS ${o['OS']} | ${o._leadTime}d | ${o['SETOR']}\n`); }
-    if (urgentes.length) { txt+= `\n🟠 URGENTE (150-179d): ${urgentes.length} OS\n`; urgentes.slice(0,20).forEach(o=> txt+= `• OS ${o['OS']} | ${o._leadTime}d | ${o['SETOR']}\n`); }
-    if (prioritarias.length) { txt+= `\n🟡 PRIORITÁRIO (120-149d): ${prioritarias.length} OS\n`; prioritarias.slice(0,20).forEach(o=> txt+= `• OS ${o['OS']} | ${o._leadTime}d | ${o['SETOR']}\n`); }
-    return ctx.reply(txt.substring(0,4096), menu);
-  } catch(e){ return ctx.reply('Erro nos alertas', menu); }
-});
-
-bot.hears(['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'], (ctx) => {
-  const mapa = { 'OS':'OS','CÓDIGO':'CODIGO','FAMÍLIA':'FAMILIA','SETOR':'SETOR','STATUS':'STATUS' };
-  esperandoFiltro[ctx.from.id]=mapa[ctx.message.text];
-  return ctx.reply(`Digite o valor para ${ctx.message.text}:`);
-});
-
-bot.on('text', async (ctx) => {
-  try {
-    const textoOriginal = ctx.message.text.trim(); if (textoOriginal.startsWith('/')) return;
-    if (['OS','CÓDIGO','FAMÍLIA','SETOR','STATUS'].includes(textoOriginal)) return;
-    const id = ctx.from.id; const texto = textoOriginal.toLowerCase();
-    const { cabecalho, dados } = await lerPlanilhaCompleta();
-    const filtroAtivo = esperandoFiltro[id];
-    let encontradas = filtroAtivo? dados.filter(d=>(d[filtroAtivo]||'').toLowerCase().includes(texto)) : dados.filter(d=>d._textoBusca.includes(texto));
-    delete esperandoFiltro[id];
-    if (encontradas.length===0) return ctx.reply(`❌ Nada para "${textoOriginal}"`, menu);
-    if (encontradas.length===1) {
-      const os = encontradas[0]; let r = `🔍 FICHA OS ${os['OS']}\n━━━━━━━━━━━━\n`;
-      cabecalho.forEach(col=>{ if(!col.startsWith('_')) r+= `${col}: ${os[col]||'-'}\n`; });
-      return ctx.reply(r.substring(0,4096), menu);
-    }
-    await ctx.reply(`✅ ${encontradas.length} OS encontradas:`);
-    for (let i=0; i<encontradas.length; i+=10) {
-      const lote = encontradas.slice(i,i+10); let msg='';
-      lote.forEach(o=>{ msg+= `• OS ${o['OS']} | COD ${o['CODIGO']} | ${o._emissaoRaw} | ${o['SETOR']} | LEAD ${o._leadTime}d\n`; });
-      await ctx.reply(msg);
-    }
-    return ctx.reply(`Total: ${encontradas.length} OS`, menu);
-  } catch(e){
-    console.error(e);
-    return ctx.reply('Erro na busca', menu);
-  }
-});
-
-// --- WEBHOOK PARA NÃO DORMIR ---
-app.get('/', (req,res)=>res.send('Bot ZROF online - webhook ativo'));
-app.get('/dashboard', async (req,res) => {
-  try {
-    const { dados } = await lerPlanilhaCompleta();
-    let html = `<h1>Dashboard - ${dados.length} OS</h1><table border=1 cellpadding=5><tr><th>OS</th><th>CODIGO</th><th>EMISSÃO</th><th>SETOR</th><th>STATUS</th><th>LEAD</th></tr>`;
-    dados.slice(0,1000).forEach(o=>{ html+=`<tr><td>${o['OS']}</td><td>${o['CODIGO']}</td><td>${o._emissaoRaw}</td><td>${o['SETOR']}</td><td>${o['STATUS']}</td><td>${o._leadTime}</td></tr>`; });
-    html+=`</table>`; res.send(html);
-  } catch(e){ res.status(500).send('Erro dashboard'); }
-});
-
-// Webhook do Telegram
-app.use(bot.webhookCallback('/telegram'));
-
-app.listen(PORT, async () => {
-  console.log(`Web ok na porta ${PORT}`);
-  const domain = process.env.RENDER_EXTERNAL_HOSTNAME;
-  if (domain) {
-    const webhookUrl = `https://${domain}/telegram`;
-    try {
-      await bot.telegram.setWebhook(webhookUrl);
-      console.log(`Webhook setado: ${webhookUrl}`);
-    } catch (e) {
-      console.error('Erro webhook:', e.message);
-    }
-  } else {
-    console.log('RENDER_EXTERNAL_HOSTNAME não definido, usando polling local');
-    bot.launch().then(()=>console.log('Bot polling ok'));
-  }
-});
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+    if (imediatas.length) { txt+= `\n🔴 IMEDI
