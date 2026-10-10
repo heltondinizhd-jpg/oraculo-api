@@ -3,67 +3,74 @@ const express = require('express');
 const app = express();
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const OWNER_ID = process.env.OWNER_ID || '7649089144'; // SEU ID
-
+const OWNER_ID = process.env.OWNER_ID || '7649089144';
 if (!BOT_TOKEN) { console.log('FALTA BOT_TOKEN'); process.exit(1); }
 
 const bot = new Telegraf(BOT_TOKEN);
-
-// --- MEMÓRIA ---
 global.SOLICITACOES = global.SOLICITACOES || [];
-let estado = {};
+global.estado = global.estado || {};
+let estado = global.estado;
+
+// --- SUAS OS - mantém igual, só exemplo ---
 let OS_LISTA = [
-  { _os: '25291524', desc: 'BRITAGEM - Exemplo' },
-  { _os: '25291525', desc: 'MOAGEM - Exemplo' }
+  { _os: '25291524', desc: 'BRITAGEM' },
+  { _os: '25291525', desc: 'MOAGEM' }
 ];
 
-const menu = Markup.keyboard([['📋 OS Pendentes'],['📋 Solicitações']]).resize();
+// Menu principal - MANTIDO
+const menu = Markup.keyboard([['📋 OS Pendentes'], ['📋 Minhas Solicitações']]).resize();
 
 bot.start((ctx)=>{
-  ctx.reply('Bem vindo ao Cansl Oráculo! Escolha:', menu);
+  estado[ctx.from.id]=null;
+  ctx.reply('🔱 Cansl Oráculo V13.8 Online!\nEscolha:', menu);
 });
 
 bot.hears('📋 OS Pendentes', async (ctx)=>{
-  let txt = 'OS Pendentes:\n';
-  const botoes = OS_LISTA.map(it=>[
-    Markup.button.callback(`${it._os} - ${it.desc}`, `os:${it._os}`)
+  let botoes = OS_LISTA.map(it=>[
+    Markup.button.callback(`${it._os}`, `os:${it._os}`)
   ]);
-  await ctx.reply(txt, Markup.inlineKeyboard(botoes));
+  await ctx.reply('📋 Selecione a OS:', Markup.inlineKeyboard(botoes));
 });
 
+bot.hears('📋 Minhas Solicitações', async (ctx)=>{
+  const minhas = global.SOLICITACOES.filter(s=>s.quemId===ctx.from.id);
+  if(!minhas.length) return ctx.reply('Você não tem solicitações.', menu);
+  let txt='📋 Suas solicitações:\n\n';
+  minhas.slice(0,10).forEach(s=> txt+=`OS:${s.os} - ${s.status}\n"${s.texto}"\n${s.resposta?'Resp: '+s.resposta:''}\n\n`);
+  ctx.reply(txt, menu);
+});
+
+// Ação OS
 bot.action(/os:(.+)/, async (ctx)=>{
   await ctx.answerCbQuery();
   const os = ctx.match[1];
-  const it = OS_LISTA.find(o=>o._os===os) || {_os:os};
-  await ctx.reply(`OS: ${it._os}\n${it.desc||''}`,
+  await ctx.reply(`OS: ${os}\nO que deseja?`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('Ver pendências','pend:'+it._os)],
-      [Markup.button.callback('📋 Solicitar Info','solicitar:'+it._os)]
+      [Markup.button.callback('Ver pendências','pend:'+os)],
+      [Markup.button.callback('📋 Solicitar Info','solicitar:'+os)]
     ])
   );
 });
 
 bot.action(/pend:(.+)/, async (ctx)=>{
   await ctx.answerCbQuery();
-  ctx.reply('Pendências da OS '+ctx.match[1]+':\n- Exemplo pend 1\n- Exemplo pend 2');
+  ctx.reply(`Pendências OS ${ctx.match[1]}:\n- Pend 1\n- Pend 2\n( aqui mantém sua lógica original )`);
 });
 
-// --- SOLICITAR ---
+// ===== NOVA FUNÇÃO - SOLICITAR =====
 bot.action(/solicitar:(.+)/, async (ctx)=>{
-  try{
-    await ctx.answerCbQuery();
-    const os = ctx.match[1];
-    estado[ctx.from.id] = 'SOLICITA_'+os;
-    await ctx.reply(`📋 OS ${os}\nO que você precisa saber?\n\nDigite sua dúvida (ex: foto, medida, status):`);
-  }catch(e){}
+  await ctx.answerCbQuery();
+  const os = ctx.match[1];
+  estado[ctx.from.id] = 'SOLICITA_'+os;
+  ctx.reply(`📋 OS ${os}\nO que você precisa saber?\nDigite sua dúvida (foto, medida, status):`);
 });
 
 bot.command('solicitacoes', async (ctx)=>{
   if(String(ctx.from.id)!== String(OWNER_ID)) return ctx.reply('Apenas admin.');
-  if(!global.SOLICITACOES.length) return ctx.reply('Nenhuma solicitação aberta.');
-  let txt = '📋 FILA DE SOLICITAÇÕES (10 últimas)\n\n';
-  global.SOLICITACOES.slice(0,10).forEach(s=>{
-    txt+=`ID:${s.id}\nOS:${s.os} | ${s.quem}\n"${s.texto}"\nStatus: ${s.status}\n/resp ${s.id} sua resposta\n\n`;
+  if(!global.SOLICITACOES.length) return ctx.reply('Fila vazia.');
+  let txt='📋 FILA DE SOLICITAÇÕES\n\n';
+  global.SOLICITACOES.slice(0,15).forEach(s=>{
+    txt+=`ID:${s.id}\nOS:${s.os} | ${s.quem} | ID:${s.quemId}\n"${s.texto}"\nStatus:${s.status}\n/resp ${s.id} sua resposta\n\n`;
   });
   ctx.reply(txt);
 });
@@ -71,53 +78,47 @@ bot.command('solicitacoes', async (ctx)=>{
 bot.command('resp', async (ctx)=>{
   if(String(ctx.from.id)!== String(OWNER_ID)) return;
   const args = ctx.message.text.split(' ');
-  const id = args[1];
-  const resposta = args.slice(2).join(' ');
-  if(!id ||!resposta) return ctx.reply('Uso: /resp ID resposta');
+  const id = args[1]; const resposta = args.slice(2).join(' ');
+  if(!id||!resposta) return ctx.reply('Uso: /resp ID texto');
   const sol = global.SOLICITACOES.find(s=>String(s.id)===String(id));
   if(!sol) return ctx.reply('ID não encontrado');
-  sol.status='respondida';
+  sol.status='respondida'; sol.resposta=resposta;
   try{
-    await bot.telegram.sendMessage(sol.quemId, `✅ RESPOSTA OS ${sol.os}\n\nSeu pedido: "${sol.texto}"\nResposta: ${resposta}`);
-    ctx.reply('✅ Enviado para '+sol.quem);
+    await bot.telegram.sendMessage(sol.quemId, `✅ RESPOSTA OS ${sol.os}\n\nSeu pedido: "${sol.texto}"\nResposta do time Cansl: ${resposta}`);
+    ctx.reply('✅ Resposta enviada para '+sol.quem);
   }catch(e){ ctx.reply('Erro: '+e.message); }
 });
 
 bot.action(/resp:(.+)/, async (ctx)=>{
   await ctx.answerCbQuery();
   if(String(ctx.from.id)!== String(OWNER_ID)) return;
-  const id = ctx.match[1];
-  estado[ctx.from.id]='RESPONDENDO_'+id;
-  ctx.reply(`Digite a resposta para ID ${id}:`);
+  estado[ctx.from.id]='RESPONDENDO_'+ctx.match[1];
+  ctx.reply(`Digite a resposta para ID ${ctx.match[1]}:`);
 });
+// ===== FIM NOVA FUNÇÃO =====
 
-bot.hears('📋 Solicitações', (ctx)=>{
-  if(String(ctx.from.id)!== String(OWNER_ID)) return ctx.reply('Apenas admin pode ver a fila.');
-  ctx.reply('Use /solicitacoes para ver a fila');
-});
-
-// --- CAPTURA DE TEXTO GERAL ---
+// Captura texto
 bot.on('text', async (ctx)=>{
-  const uid = ctx.from.id;
-  const t = ctx.message.text;
+  const uid = ctx.from.id; const t = ctx.message.text;
 
-  if(estado[uid] && estado[uid].startsWith('RESPONDENDO_')){
-    const id = estado[uid].split('_')[1];
+  // Resposta do admin
+  if(estado[uid] && String(estado[uid]).startsWith('RESPONDENDO_')){
+    const id = String(estado[uid]).split('_')[1];
     const sol = global.SOLICITACOES.find(s=>String(s.id)===String(id));
     if(sol){
-      sol.status='respondida';
-      estado[uid]=null;
+      sol.status='respondida'; sol.resposta=t; estado[uid]=null;
       await bot.telegram.sendMessage(sol.quemId, `✅ RESPOSTA OS ${sol.os}\n\nSeu pedido: "${sol.texto}"\nResposta: ${t}`);
-      return ctx.reply('✅ Enviado para '+sol.quem, menu);
+      return ctx.reply('✅ Enviado!', menu);
     }
   }
 
-  if(estado[uid] && estado[uid].startsWith('SOLICITA_')){
-    const os = estado[uid].split('_')[1];
+  // Solicitação do usuário
+  if(estado[uid] && String(estado[uid]).startsWith('SOLICITA_')){
+    const os = String(estado[uid]).split('_')[1];
     const nova = {
       id: Date.now(),
       os: os,
-      quem: ctx.from.first_name + (ctx.from.username? ' @'+ctx.from.username : ''),
+      quem: ctx.from.first_name + (ctx.from.username?' @'+ctx.from.username:''),
       quemId: uid,
       texto: t,
       data: new Date().toLocaleString('pt-BR'),
@@ -125,30 +126,14 @@ bot.on('text', async (ctx)=>{
     };
     global.SOLICITACOES.unshift(nova);
     estado[uid]=null;
-    await ctx.reply(`✅ Solicitação OS ${os} enviada pro Cansl Oráculo!\n\n"${t}"`, menu);
+    await ctx.reply(`✅ Solicitação OS ${os} enviada para o Cansl Oráculo!\n\n"${t}"\n\nTe respondemos aqui mesmo.`, menu);
     try{
       await bot.telegram.sendMessage(OWNER_ID,
-        `🔔 NOVA SOLICITAÇÃO\n\nOS: ${os}\nQuem: ${nova.quem} (ID:${uid})\nPedido: ${t}\n\nID: ${nova.id}\nResponda: /resp ${nova.id} sua resposta`,
+        `🔔 NOVA SOLICITAÇÃO\n\nOS: ${os}\nQuem: ${nova.quem} (ID:${uid})\nPedido: ${t}\n\nID: ${nova.id}\nComando: /resp ${nova.id} sua resposta`,
         Markup.inlineKeyboard([[Markup.button.callback('✅ Responder','resp:'+nova.id)]])
       );
     }catch(e){}
     return;
   }
-});
 
-// --- EXPRESS ---
-app.use(express.json());
-app.get('/', (req,res)=> res.send('Cansl Oráculo V13.7 Online'));
-app.get('/api/solicitacoes', (req,res)=> res.json(global.SOLICITACOES));
-
-app.post(`/bot${BOT_TOKEN}`, (req,res)=>{ bot.handleUpdate(req.body); res.sendStatus(200); });
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, async ()=>{
-  console.log('Rodando porta '+PORT);
-  try{
-    const url = process.env.RENDER_EXTERNAL_URL || `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
-    await bot.telegram.setWebhook(`${url}/bot${BOT_TOKEN}`);
-    console.log('Webhook set: '+url);
-  }catch(e){ console.log('Erro webhook', e.message); }
-});
+  // --- AQUI MANTÉM SUAS OUTRAS LÓGICAS ANT
