@@ -1,307 +1,171 @@
-// index.js - V13.8 - MANUTENCAO + PROGRAMACAO + CONTROLE ACESSO
 const express = require('express');
-const { Telegraf, Markup } = require('telegraf');
-const { google } = require('googleapis');
-
-const app = express();
+const axios = require('axios');
+let Telegraf, Markup;
+try { const t=require('telegraf'); Telegraf=t.Telegraf; Markup=t.Markup; } catch(e){ console.log('telegraf falta'); }
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_ID = process.env.SHEET_ID || '1OENZXXBhbfVxpsTNTyv5ZVBBjN-NooveITz3kr5U9PE';
 const PORT = process.env.PORT || 3000;
+const WEBHOOK_PATH = '/telegraf/'+BOT_TOKEN;
+const app = express();
+app.use(express.json());
+let cache={dados:null,hora:0};
+let cacheMat={dados:null,hora:0};
+let estado={};
 
-if (!BOT_TOKEN ||!SPREADSHEET_ID) {
-  console.error('Faltando BOT_TOKEN ou SPREADSHEET_ID');
+async function lerMateriais(){
+  if(cacheMat.dados && Date.now()-cacheMat.hora<120000) return cacheMat.dados;
+  try{
+    const r=await axios.get('https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/gviz/tq?tqx=out:csv&sheet=BD_MAT',{responseType:'text',timeout:20000});
+    if(r.data.includes('<html')) throw new Error('html');
+    const linhas=r.data.split(/\r?\n/).filter(function(l){return l.trim();});
+    const porOS={}, porOSPend={}; let total=0, totalPend=0;
+    for(let i=1;i<linhas.length;i++){
+      let line=linhas[i], cols=[], cur='', inQ=false;
+      for(let j=0;j<line.length;j++){ let c=line[j]; if(c=='"'){ if(line[j+1]=='"'){cur+='"';j++;} else inQ=!inQ;} else if(c==','&&!inQ){cols.push(cur);cur='';} else cur+=c; }
+      cols.push(cur);
+      const cl=cols.map(function(s){return s.replace(/^"|"$/g,'').trim();});
+      const os=(cl[0]||'').replace(/\D/g,''); if(!os) continue;
+      const nec=parseFloat((cl[5]||'0').replace(',','.'))||0;
+      const ret=parseFloat((cl[6]||'0').replace(',','.'))||0;
+      const isPend=!cl[6] || cl[6]==='0' || ret < nec || ret===0;
+      if(!porOS[os]) porOS[os]=[];
+      porOS[os].push({txtOrdem:cl[1],item:cl[2],material:cl[3],txt:cl[4],nec:cl[5],ret:cl[6],po:cl[7]});
+      if(isPend){ if(!porOSPend[os]) porOSPend[os]=[]; porOSPend[os].push({txtOrdem:cl[1],item:cl[2],material:cl[3],txt:cl[4],nec:cl[5],ret:cl[6],po:cl[7]}); totalPend++; }
+      total++;
+    }
+    const res={porOS:porOS,porOSPend:porOSPend,total:total,totalPend:totalPend};
+    cacheMat={dados:res,hora:Date.now()}; return res;
+  }catch(e){ console.log('BD_MAT erro',e.message); return {porOS:{},porOSPend:{},total:0,totalPend:0}; }
 }
 
-const bot = new Telegraf(BOT_TOKEN);
-
-// ===== CONFIG ABAS =====
-const ABA_BASE = 'BASE'; // sua aba principal de materiais
-const ABA_PROGRAMACAO = 'PROGRAMACAO';
-const SETORES_PROG = ['ELETRICA', 'MECANICA MINA', 'MECANICA USINA'];
-
-// ===== CONTROLE DE ACESSO - COLOCA SEUS IDs AQUI =====
-// Pega seu ID em @userinfobot
-const ADMINS = ['123456789']; // SEU ID - ACESSO TOTAL
-const FRESTA_ELETRICA = ['']; // IDs que podem ver/alterar ELETRICA
-const FRESTA_MINA = []; // IDs MECANICA MINA
-const FRESTA_USINA = []; // IDs MECANICA USINA
-const LIBERADO_VER = true; // true = qualquer um vê, false = só IDs acima
-
-function isAdmin(id){ return ADMINS.includes(String(id)); }
-function podeVer(id){
-  if(LIBERADO_VER) return true;
-  const s = String(id);
-  return isAdmin(s) || [...FRESTA_ELETRICA,...FRESTA_MINA,...FRESTA_USINA].includes(s);
+async function lerPlanilha(){
+  if(cache.dados && Date.now()-cache.hora<120000) return cache.dados;
+  try{
+    const r=await axios.get('https://docs.google.com/spreadsheets/d/'+SHEET_ID+'/gviz/tq?tqx=out:csv',{responseType:'text',timeout:20000});
+    const linhas=r.data.split(/\r?\n/).filter(function(l){return l.trim();});
+    const cabOriginal=linhas[0].split(',').map(function(s){return s.replace(/^"|"$/g,'').trim();});
+    const cabU=cabOriginal.map(function(h){return h.toUpperCase();});
+    let idxOS=cabU.indexOf('OS'); if(idxOS<0) idxOS=cabU.findIndex(function(h){return h.includes('ORDEM');});
+    let idxSetor=cabU.findIndex(function(h){return h.includes('SETOR');});
+    let idxFam=cabU.findIndex(function(h){return h.includes('FAMILIA');});
+    let idxGrupo=cabU.findIndex(function(h){return h.includes('GRUPO');});
+    const mapaOrdens={}, mapaMina={}, mapaUsina={}, porSetor={}, porSetorMina={}, porSetorUsina={}, porFamilia={}, dadosFull=[];
+    for(let i=1;i<linhas.length;i++){
+      let line=linhas[i], cols=[], cur='', inQ=false;
+      for(let j=0;j<line.length;j++){ let c=line[j]; if(c=='"'){ if(line[j+1]=='"'){cur+='"';j++;} else inQ=!inQ;} else if(c==','&&!inQ){cols.push(cur);cur='';} else cur+=c; }
+      cols.push(cur);
+      const get=function(idx){ return idx>=0?(cols[idx]||'').replace(/^"|"$/g,'').trim():''; };
+      const os=get(idxOS).replace(/\D/g,''); if(!os) continue;
+      const setor=(get(idxSetor)||'SEM').toUpperCase().trim();
+      const fam=(get(idxFam)||'SEM').toUpperCase().trim();
+      const grupo=(get(idxGrupo)||'').toUpperCase().trim();
+      let macro='OUTROS'; if(grupo.startsWith('M')) macro='MINA'; else if(grupo.startsWith('U')) macro='USINA';
+      const row={}; cabOriginal.forEach(function(n,idx){row[n]=get(idx);}); row['_MACRO']=macro;
+      dadosFull.push({_os:os,_setor:setor,_familia:fam,_grupo:grupo,_macro:macro,_row:row,_busca:line.toLowerCase()});
+      if(!mapaOrdens[os]){ mapaOrdens[os]=1; porSetor[setor]=(porSetor[setor]||0)+1; porFamilia[fam]=(porFamilia[fam]||0)+1; }
+      if(macro==='MINA'&&!mapaMina[os]){ mapaMina[os]=1; porSetorMina[setor]=(porSetorMina[setor]||0)+1; }
+      if(macro==='USINA'&&!mapaUsina[os]){ mapaUsina[os]=1; porSetorUsina[setor]=(porSetorUsina[setor]||0)+1; }
+    }
+    const result={totalOrdens:Object.keys(mapaOrdens).length,totalMina:Object.keys(mapaMina).length,totalUsina:Object.keys(mapaUsina).length,porMacro:{MINA:Object.keys(mapaMina).length,USINA:Object.keys(mapaUsina).length},porSetor:porSetor,porSetorMina:porSetorMina,porSetorUsina:porSetorUsina,porFamilia:porFamilia,dadosFull:dadosFull};
+    cache={dados:result,hora:Date.now()}; return result;
+  }catch(e){ return cache.dados; }
 }
-function podeEditarSetor(id, setor){
-  const s = String(id);
-  if(isAdmin(s)) return true;
-  if(setor==='ELETRICA') return FRESTA_ELETRICA.includes(s);
-  if(setor==='MECANICA MINA') return FRESTA_MINA.includes(s);
-  if(setor==='MECANICA USINA') return FRESTA_USINA.includes(s);
-  return false;
-}
-function podeEditarGeral(id){
-  const s = String(id);
-  return isAdmin(s) || [...FRESTA_ELETRICA,...FRESTA_MINA,...FRESTA_USINA].includes(s);
-}
-
-// ===== GOOGLE SHEETS =====
-async function getAuth(){
-  const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-  const auth = new google.auth.GoogleAuth({
-    credentials: creds,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets']
-  });
-  return auth.getClient();
-}
-async function getSheetData(aba){
-  const auth = await getAuth();
-  const sheets = google.sheets({version:'v4', auth});
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${aba}!A:Z`
-  });
-  return res.data.values || [];
-}
-async function updateStatusProgramacao(os, novoStatus){
-  const auth = await getAuth();
-  const sheets = google.sheets({version:'v4', auth});
-  const rows = await getSheetData(ABA_PROGRAMACAO);
-  const idx = rows.findIndex((r,i)=> i>0 && String(r[0]).trim()===String(os).trim());
-  if(idx===-1) return false;
-  // coluna G = 7ª letra = status
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${ABA_PROGRAMACAO}!G${idx+1}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [[novoStatus]] }
-  });
-  return true;
-}
-
-// ===== HELPERS =====
-function parseDataBR(v){
-  if(!v) return null;
-  if(v instanceof Date) return v;
-  const s = String(v).trim();
-  if(s.includes('/')){
-    const [d,m,y] = s.split('/').map(x=>parseInt(x));
-    return new Date(y<100?2000+y:y, (m||1)-1, d||1);
+function somaObj(o){ let s=0; for(let k in o){ s+=o[k]; } return s; }
+app.get('/',function(req,res){ res.send('OK V13.7.1 SETORES <a href="/dashboard">Dashboard</a>'); });
+app.get('/ping',function(req,res){ res.send('pong '+Date.now()); });
+app.get('/api/check', async function(req,res){
+  try{ const d=await lerPlanilha(); const m=await lerMateriais(); res.json({totalOrdens:d.totalOrdens,totalMina:d.totalMina,totalUsina:d.totalUsina,totalMat:m.total,totalPend:m.totalPend}); }catch(e){ res.json({erro:e.message}); }
+});
+app.get('/dashboard', async function(req,res){
+  try{
+    const d=await lerPlanilha(); const m=await lerMateriais();
+    const dd=d||{totalOrdens:0,totalMina:0,totalUsina:0,porMacro:{MINA:0,USINA:0},porSetor:{},porSetorMina:{},porSetorUsina:{},porFamilia:{}};
+    const mm=m||{total:0,totalPend:0}; const j=JSON.stringify(dd);
+    let html='<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script><style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.big{font-size:22px;font-weight:800}.label{opacity:.7;font-size:12px}@media(max-width:700px){.grid,.kpis{grid-template-columns:1fr}}</style></head><body>';
+    html+='<h2>ZROF Dashboard V13.7.1 SETORES</h2><div class="kpis"><div class="card"><div class="label">Total Ordens</div><div class="big">'+dd.totalOrdens+'</div></div><div class="card"><div class="label">MINA</div><div class="big">'+dd.totalMina+'</div></div><div class="card"><div class="label">USINA</div><div class="big">'+dd.totalUsina+'</div></div><div class="card"><div class="label">Pend BD_MAT</div><div class="big">'+mm.totalPend+'/'+mm.total+'</div></div></div>';
+    html+='<div class="grid"><div class="card"><h3>Macro Mina x Usina</h3><canvas id="cMacro"></canvas></div><div class="card"><h3>Setor Geral</h3><canvas id="cSetor"></canvas></div></div><div class="grid"><div class="card"><h3>Setor MINA</h3><canvas id="cSetorMina"></canvas></div><div class="card"><h3>Setor USINA</h3><canvas id="cSetorUsina"></canvas></div></div><div class="card"><h3>Familia Top 12</h3><canvas id="cFam"></canvas></div>';
+    html+='<script>var d='+j+';function sortE(o){return Object.entries(o||{}).sort(function(a,b){return b[1]-a[1]})}';
+    html+='new Chart(document.getElementById("cMacro"),{type:"doughnut",data:{labels:Object.keys(d.porMacro),datasets:[{data:Object.values(d.porMacro),backgroundColor:["#38bdf8","#fbbf24"]}]},options:{plugins:{legend:{labels:{color:"#fff"}}}}});';
+    html+='function makeBar(id,obj,color){var c=document.getElementById(id);if(!c)return;var e=sortE(obj).slice(0,12);new Chart(c,{type:"bar",data:{labels:e.map(function(x){return x[0]}),datasets:[{data:e.map(function(x){return x[1]}),backgroundColor:color}]},options:{indexAxis:"y",plugins:{legend:{display:false}}}})};';
+    html+='makeBar("cSetor",d.porSetor,"#a78bfa");makeBar("cSetorMina",d.porSetorMina,"#38bdf8");makeBar("cSetorUsina",d.porSetorUsina,"#fbbf24");makeBar("cFam",d.porFamilia,"#34d399");</script></body></html>'; res.send(html);
+  }catch(e){ res.send('Erro '+e.message); }
+});
+let bot=null;
+if(BOT_TOKEN && Telegraf){ bot=new Telegraf(BOT_TOKEN); app.use(bot.webhookCallback(WEBHOOK_PATH)); }
+app.listen(PORT,function(){
+  console.log('WEB ON '+PORT+' V13.7.1');
+  if(bot){
+    const domain=process.env.RENDER_EXTERNAL_HOSTNAME;
+    if(domain){ const webhookUrl='https://'+domain+WEBHOOK_PATH; bot.telegram.setWebhook(webhookUrl).catch(function(e){ console.log(e.message); }); }
+    else{ bot.telegram.deleteWebhook({drop_pending_updates:true}).then(function(){ bot.launch(); }); }
+    setInterval(function(){ const url=process.env.RENDER_EXTERNAL_URL || (domain?'https://'+domain:''); if(url){ axios.get(url+'/ping').catch(function(){}); } }, 9*60*1000);
   }
-  return new Date(v);
-}
-function hojeZerado(){ const d=new Date(); d.setHours(0,0,0,0); return d; }
-
-// Busca setor original da OS na aba BASE (MINA/USINA)
-let cacheBase = null;
-async function getSetorOriginalDaOS(os){
-  if(!cacheBase){
-    const rows = await getSheetData(ABA_BASE);
-    cacheBase = rows;
-  }
-  const r = cacheBase.find(x=> String(x[0]).includes(String(os)) );
-  if(!r) return 'DESCONHECIDO';
-  // supondo que coluna GRUPO seja coluna B ou C - ajuste se precisar
-  return String(r[2]||'').toUpperCase().includes('MINA')? 'MINA' : 'USINA';
-}
-
-async function getProgramacao(){
-  const rows = await getSheetData(ABA_PROGRAMACAO);
-  if(rows.length<=1) return [];
-  // OS | SETOR_PROG | DATA_INI | DATA_FIM | TURNO | RESPONSAVEL | STATUS | PRIORIDADE | OBS
-  const dados = [];
-  for(let i=1;i<rows.length;i++){
-    const r = rows[i];
-    if(!r[0]) continue;
-    dados.push({
-      os: String(r[0]).trim(),
-      setorProg: String(r[1]||'').toUpperCase().trim(),
-      dataIni: parseDataBR(r[2]),
-      dataFim: parseDataBR(r[3])||parseDataBR(r[2]),
-      turno: r[4]||'',
-      responsavel: r[5]||'',
-      status: String(r[6]||'').toUpperCase().trim(),
-      prioridade: r[7]||'',
-      obs: r[8]||'',
-      linha: i+1
-    });
-  }
-  return dados;
-}
-function filtraPorPeriodo(prog, tipo){
-  const h = hojeZerado();
-  if(tipo==='hoje'){
-    return prog.filter(p=> p.dataIni && p.dataIni.getTime()===h.getTime() || (p.dataIni<=h && p.dataFim>=h));
-  }
-  if(tipo==='semana'){
-    const ini = new Date(h); ini.setDate(h.getDate()-h.getDay()+1); // segunda
-    const fim = new Date(ini); fim.setDate(ini.getDate()+6);
-    return prog.filter(p=> p.dataIni>=ini && p.dataIni<=fim);
-  }
-  return prog;
-}
-function statusIcon(s){
-  s = (s||'').toUpperCase();
-  if(s.includes('AGUARDANDO')) return '🟡';
-  if(s.includes('EM MANUTENCAO')) return '🔵';
-  if(s.includes('INTERROMPIDO')) return '🟠';
-  if(s.includes('CANCELADO')) return '🔴';
-  if(s.includes('CONCLUIDO')) return '🟢';
-  return '⚪';
-}
-
-// ===== MENU PRINCIPAL =====
-bot.start(async (ctx)=>{
-  if(!podeVer(ctx.from.id)) return ctx.reply('⛔ Acesso não liberado. Fale com o administrador.');
-  await ctx.reply(
-    `👋 Olá ${ctx.from.first_name}!\n\nBot Manutenção V13.8`,
-    Markup.keyboard([
-      ['📦 Material Faltante', '🏢 Setores'],
-      ['📅 Programação', '📊 Dashboard'],
-      ['🧹 Limpar Filtros']
-    ]).resize()
-  );
 });
-
-bot.hears('📅 Programação', async (ctx)=> mostrarMenuProgramacao(ctx));
-bot.action('menu_programacao', async (ctx)=> mostrarMenuProgramacao(ctx));
-
-async function mostrarMenuProgramacao(ctx){
-  if(!podeVer(ctx.from?.id)) return ctx.answerCbQuery('Sem acesso');
-  const prog = await getProgramacao();
-  const qtdEle = prog.filter(p=>p.setorProg==='ELETRICA').length;
-  const qtdMina = prog.filter(p=>p.setorProg==='MECANICA MINA').length;
-  const qtdUsina = prog.filter(p=>p.setorProg==='MECANICA USINA').length;
-
-  const text = `📅 *PROGRAMAÇÃO*\nTotal: ${prog.length} OS programadas\n\n⚡ ELETRICA (${qtdEle}) - atende MINA e USINA\n⛏️ MEC MINA (${qtdMina})\n🏭 MEC USINA (${qtdUsina})`;
-
-  const kb = Markup.inlineKeyboard([
-    [Markup.button.callback(`⚡ ELETRICA (${qtdEle})`, 'prog_setor_ELETRICA')],
-    [Markup.button.callback(`⛏️ MECANICA MINA (${qtdMina})`, 'prog_setor_MECANICA MINA')],
-    [Markup.button.callback(`🏭 MECANICA USINA (${qtdUsina})`, 'prog_setor_MECANICA USINA')],
-    [Markup.button.callback('📅 Hoje', 'prog_hoje'), Markup.button.callback('📅 Semana', 'prog_semana')],
-    [Markup.button.callback('🚦 Por Status', 'prog_status_menu')],
-  ]);
-
-  if(ctx.callbackQuery) await ctx.editMessageText(text, {parse_mode:'Markdown',...kb});
-  else await ctx.reply(text, {parse_mode:'Markdown',...kb});
-}
-
-bot.action(/prog_setor_(.+)/, async (ctx)=>{
-  const setor = ctx.match[1];
-  const prog = await getProgramacao();
-  let filtrada = prog.filter(p=>p.setorProg===setor);
-
-  let txt = `*${setor}* - ${filtrada.length} OS\n\n`;
-  filtrada.slice(0,20).forEach(p=>{
-    txt+=`${statusIcon(p.status)} OS ${p.os} | ${p.dataIni?.toLocaleDateString('pt-BR')} - ${p.dataFim?.toLocaleDateString('pt-BR')} | ${p.status}\n👷 ${p.responsavel||'-'} | ${p.turno||''} ${p.prioridade? '| '+p.prioridade:''}\n\n`;
+if(bot){
+  const menu=Markup.keyboard([['🔍 Buscar OS','📦 Materiais OS'],['📊 Resumo','📈 Dashboard'],['🏢 Setores','🧹 Limpar']]).resize();
+  bot.catch(function(err){console.log('BOT ERRO',err.message);});
+  bot.start(function(ctx){return ctx.reply('ZROF V13.7.1 SETORES Online',menu);});
+  bot.hears(/Buscar OS/, function(ctx){ estado[ctx.from.id]='BUSCA'; ctx.reply('Digite OS ou texto:',menu); });
+  bot.hears(/Materiais OS/, function(ctx){ estado[ctx.from.id]='MAT'; ctx.reply('Digite OS pendentes ex 25291524:',menu); });
+  bot.hears(/Resumo/, async function(ctx){
+    const d=await lerPlanilha(); const mm=await lerMateriais();
+    let txt='RESUMO\nTotal:'+d.totalOrdens+' Mina:'+d.totalMina+' Usina:'+d.totalUsina+' Pend:'+mm.totalPend+'/'+mm.total+'\n\nSETOR GERAL\n';
+    Object.entries(d.porSetor).sort(function(a,b){return b[1]-a[1];}).forEach(function(p){ txt+=p[0]+':'+p[1]+'\n'; });
+    for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu);
   });
-  if(filtrada.length===0) txt+='Nenhuma OS neste setor.';
-
-  const botoes = filtrada.slice(0,8).map(p=> [Markup.button.callback(`${statusIcon(p.status)} OS ${p.os}`, `prog_os_${p.os}`)]);
-
-  await ctx.editMessageText(txt, {
-    parse_mode:'Markdown',
-   ...Markup.inlineKeyboard([...botoes, [Markup.button.callback('🔙 Voltar','menu_programacao')]])
+  bot.hears(/Dashboard/, async function(ctx){ const dom=process.env.RENDER_EXTERNAL_HOSTNAME; ctx.reply('https://'+dom+'/dashboard',menu); });
+  bot.hears(/Limpar/, async function(ctx){ cache={dados:null,hora:0}; cacheMat={dados:null,hora:0}; ctx.reply('Limpando...',menu); const d=await lerPlanilha(); const mm=await lerMateriais(); ctx.reply('Cache limpo Ordens:'+d.totalOrdens+' Pend:'+mm.totalPend,menu); });
+  bot.hears(/Setores/, async function(ctx){
+    const d=await lerPlanilha(); const setores=Object.keys(d.porSetor).sort();
+    const botoes=setores.map(function(s){ return [Markup.button.callback(s+' ('+d.porSetor[s]+')','setor:'+s+':0')]; });
+    await ctx.reply('🏢 Escolha o setor:', Markup.inlineKeyboard(botoes));
   });
-});
-
-bot.action(/prog_os_(\d+)/, async (ctx)=>{
-  const os = ctx.match[1];
-  const prog = await getProgramacao();
-  const item = prog.find(p=>p.os===os);
-  if(!item) return ctx.answerCbQuery('OS não encontrada');
-
-  const podeEditar = podeEditarGeral(ctx.from.id) && (podeEditarSetor(ctx.from.id, item.setorProg) || isAdmin(ctx.from.id));
-
-  let txt = `*OS ${item.os}*\nSetor Prog: ${item.setorProg}\nPeríodo: ${item.dataIni?.toLocaleDateString()} a ${item.dataFim?.toLocaleDateString()}\nStatus: ${statusIcon(item.status)} ${item.status}\nResp: ${item.responsavel}\nTurno: ${item.turno}\nObs: ${item.obs||'-'}`;
-
-  const kb = podeEditar? Markup.inlineKeyboard([
-    [Markup.button.callback('▶️ Em Manutenção','upd_'+os+'_EM MANUTENCAO'), Markup.button.callback('⏸️ Interromper','upd_'+os+'_INTERROMPIDO')],
-    [Markup.button.callback('✅ Concluir','upd_'+os+'_CONCLUIDO'), Markup.button.callback('❌ Cancelar','upd_'+os+'_CANCELADO')],
-    [Markup.button.callback('🟡 Aguardando','upd_'+os+'_AGUARDANDO MANUTENCAO')],
-    [Markup.button.callback('🔙 Voltar','menu_programacao')]
-  ]) : Markup.inlineKeyboard([[Markup.button.callback('🔙 Voltar','menu_programacao')]]);
-
-  await ctx.editMessageText(txt, {parse_mode:'Markdown',...kb});
-});
-
-bot.action(/upd_(\d+)_(.+)/, async (ctx)=>{
-  const os = ctx.match[1];
-  const novoStatus = ctx.match[2];
-  if(!podeEditarGeral(ctx.from.id)) return ctx.answerCbQuery('⛔ Sem permissão');
-
-  await updateStatusProgramacao(os, novoStatus);
-  await ctx.answerCbQuery(`OS ${os} -> ${novoStatus}`);
-  await ctx.editMessageText(`✅ OS ${os} atualizada para *${novoStatus}*`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🔙 Voltar','menu_programacao')]])});
-});
-
-bot.action('prog_hoje', async (ctx)=>{
-  const prog = await getProgramacao();
-  const filtrada = filtraPorPeriodo(prog,'hoje');
-  let txt = `*HOJE - ${hojeZerado().toLocaleDateString('pt-BR')}* - ${filtrada.length} OS\n\n`;
-  filtrada.forEach(p=> txt+=`${statusIcon(p.status)} [${p.setorProg}] OS ${p.os} - ${p.status} - ${p.responsavel}\n`);
-  if(filtrada.length===0) txt+='Nenhuma OS pra hoje.';
-  await ctx.editMessageText(txt, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🔙 Voltar','menu_programacao')]])});
-});
-
-bot.action('prog_semana', async (ctx)=>{
-  const prog = await getProgramacao();
-  const filtrada = filtraPorPeriodo(prog,'semana');
-  let txt = `*SEMANA* - ${filtrada.length} OS\n\n`;
-  filtrada.forEach(p=> txt+=`${statusIcon(p.status)} ${p.dataIni?.toLocaleDateString()} [${p.setorProg}] OS ${p.os} - ${p.status}\n`);
-  await ctx.editMessageText(txt, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🔙 Voltar','menu_programacao')]])});
-});
-
-bot.action('prog_status_menu', async (ctx)=>{
-  await ctx.editMessageText('Filtrar por status:', Markup.inlineKeyboard([
-    [Markup.button.callback('🟡 Aguardando','prog_fstatus_AGUARDANDO'), Markup.button.callback('🔵 Em Manut','prog_fstatus_EM MANUTENCAO')],
-    [Markup.button.callback('🟠 Interrompido','prog_fstatus_INTERROMPIDO'), Markup.button.callback('🔴 Cancelado','prog_fstatus_CANCELADO')],
-    [Markup.button.callback('🟢 Concluído','prog_fstatus_CONCLUIDO')],
-    [Markup.button.callback('🔙 Voltar','menu_programacao')]
-  ]));
-});
-
-bot.action(/prog_fstatus_(.+)/, async (ctx)=>{
-  const f = ctx.match[1];
-  const prog = await getProgramacao();
-  const filtrada = prog.filter(p=> p.status.includes(f));
-  let txt = `*Status: ${f}* - ${filtrada.length} OS\n\n`;
-  filtrada.slice(0,20).forEach(p=> txt+=`${statusIcon(p.status)} [${p.setorProg}] OS ${p.os} - ${p.dataIni?.toLocaleDateString()} - ${p.responsavel}\n`);
-  await ctx.editMessageText(txt, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🔙 Voltar','prog_status_menu')]])});
-});
-
-// ===== DASHBOARD WEB =====
-app.get('/dashboard', async (req,res)=>{
-  const prog = await getProgramacao();
-  const porSetor = {
-    ELETRICA: prog.filter(p=>p.setorProg==='ELETRICA').length,
-    MINA: prog.filter(p=>p.setorProg==='MECANICA MINA').length,
-    USINA: prog.filter(p=>p.setorProg==='MECANICA USINA').length,
-  };
-  const porStatus = {};
-  prog.forEach(p=>{ porStatus[p.status]=(porStatus[p.status]||0)+1; });
-
-  res.send(`
-  <html><head><title>Dashboard V13.8</title>
-  <style>body{font-family:Arial;padding:20px}.card{border:1px solid #ddd;padding:15px;border-radius:10px;display:inline-block;margin:10px;min-width:180px}</style>
-  </head><body>
-  <h2>Dashboard Programação V13.8</h2>
-  <div class="card"><h3>⚡ ELÉTRICA</h3><b>${porSetor.ELETRICA}</b> OS<br>Atende MINA e USINA</div>
-  <div class="card"><h3>⛏️ MEC MINA</h3><b>${porSetor.MINA}</b> OS</div>
-  <div class="card"><h3>🏭 MEC USINA</h3><b>${porSetor.USINA}</b> OS</div>
-  <h3>Por Status</h3>
-  <pre>${JSON.stringify(porStatus,null,2)}</pre>
-  <h3>Detalhe</h3>
-  <table border=1 cellpadding=5><tr><th>OS</th><th>SetorProg</th><th>Data</th><th>Status</th><th>Resp</th></tr>
-  ${prog.map(p=>`<tr><td>${p.os}</td><td>${p.setorProg}</td><td>${p.dataIni?.toLocaleDateString()}</td><td>${p.status}</td><td>${p.responsavel}</td></tr>`).join('')}
-  </table>
-  </body></html>
-  `);
-});
-
-app.get('/', (req,res)=> res.send('Bot V13.8 online'));
-
-bot.launch();
-app.listen(PORT, ()=> console.log('V13.8 rodando na porta '+PORT));
+  bot.on('text', async function(ctx){
+    const t=ctx.message.text.trim(); if(t.includes('Buscar OS')||t.includes('Materiais OS')||t.includes('Resumo')||t.includes('Dashboard')||t.includes('Limpar')||t.includes('Setores')||t.startsWith('/')) return;
+    const d=await lerPlanilha(); const m=await lerMateriais();
+    if(estado[ctx.from.id]==='MAT'){
+      estado[ctx.from.id]=null; const os=t.replace(/\D/g,''); const todos=m.porOS[os]||[]; const pend=m.porOSPend[os]||[];
+      if(!todos.length) return ctx.reply('Nada BD_MAT para '+os,menu);
+      if(!pend.length) return ctx.reply('OS '+os+' SEM PENDENCIAS! '+todos.length+' ja retirados.',menu);
+      let txt='PENDENTES OS '+os+' ('+pend.length+' de '+todos.length+')\n\n'; pend.forEach(function(x,i){ txt+=(i+1)+') MAT:'+x.material+' '+x.txt+'\nNEC:'+x.nec+' RET:'+x.ret+' PO:'+x.po+'\n\n'; });
+      for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu); return;
+    }
+    const ach=d.dadosFull.filter(function(x){ return x._busca.includes(t.toLowerCase()); });
+    if(!ach.length) return ctx.reply('Nada para '+t,menu);
+    for(const it of ach.slice(0,3)){
+      let det='OS:'+it._os+' Macro:'+it._macro+' Setor:'+it._setor+' Familia:'+it._familia+' Grupo:'+it._grupo+'\n';
+      for(const kv of Object.entries(it._row)){ if(kv[1]) det+=kv[0]+':'+kv[1]+'\n'; }
+      const qTot=m.porOS[it._os]?.length||0; const qPend=m.porOSPend[it._os]?.length||0; det+='\nBD_MAT total '+qTot+' pend '+qPend;
+      if(qPend>0) await ctx.reply(det.substring(0,3900), Markup.inlineKeyboard([[Markup.button.callback('Ver '+qPend+' pend','pend:'+it._os)]]));
+      else await ctx.reply(det.substring(0,4000),menu);
+    }
+  });
+  bot.action(/pend:(.+)/, async function(ctx){
+    await ctx.answerCbQuery(); const os=ctx.match[1]; const mm=await lerMateriais(); const pend=mm.porOSPend[os]||[]; const todos=mm.porOS[os]||[];
+    if(!pend.length) return ctx.reply('SEM PENDENCIAS',menu);
+    let txt='PENDENTES OS '+os+' ('+pend.length+' de '+todos.length+')\n\n'; pend.forEach(function(x,i){ txt+=(i+1)+') ITEM:'+x.item+' MAT:'+x.material+' '+x.txt+'\nNEC:'+x.nec+' RET:'+x.ret+' PO:'+x.po+'\n\n'; });
+    for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu);
+  });
+  bot.action(/setor:(.+):(\d+)/, async function(ctx){
+    await ctx.answerCbQuery(); const setorNome=ctx.match[1]; const pageNum=parseInt(ctx.match[2])||0;
+    const d=await lerPlanilha(); const m=await lerMateriais();
+    const lista=d.dadosFull.filter(function(x){ return x._setor===setorNome; });
+    const unicas={}; lista.forEach(function(it){ unicas[it._os]=it; }); const ordens=Object.values(unicas);
+    const porPagina=10; const totalPag=Math.ceil(ordens.length/porPagina); const inicio=pageNum*porPagina; const slice=ordens.slice(inicio,inicio+porPagina);
+    if(!slice.length) return ctx.reply('Nada para '+setorNome,menu);
+    let txt='🏢 SETOR: '+setorNome+'\nTotal: '+ordens.length+' ordens | Pag '+(pageNum+1)+'/'+totalPag+'\n\n';
+    slice.forEach(function(it,i){ const qTot=m.porOS[it._os]?.length||0; const qPend=m.porOSPend[it._os]?.length||0; txt+=(inicio+i+1)+') OS:'+it._os+' | '+it._familia+' | Pend:'+qPend+'/'+qTot+'\n'; });
+    const nav=[]; if(pageNum>0) nav.push(Markup.button.callback('⬅️ Anterior','setor:'+setorNome+':'+(pageNum-1))); if(pageNum<totalPag-1) nav.push(Markup.button.callback('Próxima ➡️','setor:'+setorNome+':'+(pageNum+1)));
+    const botoesOS=slice.slice(0,5).map(function(it){ return [Markup.button.callback('📋 Ver OS '+it._os,'detos:'+it._os)]; });
+    const teclado=[...botoesOS]; if(nav.length) teclado.push(nav);
+    await ctx.reply(txt, Markup.inlineKeyboard(teclado));
+  });
+  bot.action(/detos:(.+)/, async function(ctx){
+    await ctx.answerCbQuery(); const os=ctx.match[1]; const d=await lerPlanilha(); const m=await lerMateriais();
+    const ach=d.dadosFull.filter(function(x){ return x._os===os; }); if(!ach.length) return ctx.reply('OS '+os+' nao encontrada',menu);
+    const it=ach[0]; let det='📋 OS:'+it._os+' Macro:'+it._macro+'\n🏢 Setor:'+it._setor+'\n👪 Familia:'+it._familia+'\n';
+    for(const kv of Object.entries(it._row)){ if(kv[1]) det+=kv[0]+':'+kv[1]+'\n'; }
+    const qTot=m.porOS[it._os]?.length||0; const qPend=m.porOSPend[it._os]?.length||0; det+='\n📦 BD_MAT total '+qTot+' pend '+qPend;
+    if(qPend>0) await ctx.reply(det.substring(0,3900), Markup.inlineKeyboard([[Markup.button.callback('Ver '+qPend+' pend','pend:'+os)]])); else await ctx.reply(det.substring(0,4000),menu);
+  });
+}
