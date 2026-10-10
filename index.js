@@ -83,8 +83,7 @@ async function lerPlanilha(){
   }catch(e){ return cache.dados; }
 }
 
-// ROTAS PRIMEIRO - ANTES DO WEBHOOK
-app.get('/',(req,res)=>res.send('OK V13.6.1 <a href="/dashboard">Dashboard</a> <a href="/api/resumo">API</a> <a href="/api/check">CHECK</a>'));
+app.get('/',(req,res)=>res.send('OK V13.6.2 <a href="/dashboard">Dashboard</a> <a href="/api/resumo">API</a> <a href="/api/check">CHECK</a>'));
 app.get('/ping',(req,res)=>res.send('pong '+Date.now()));
 app.get('/api/resumo', async (req,res)=>{ const d=await lerPlanilha(); const m=await lerMateriais(); res.json({d,m}); });
 app.get('/api/check', async (req,res)=>{
@@ -100,12 +99,11 @@ app.get('/dashboard', async (req,res)=>{
   try{
     const d=await lerPlanilha(); const m=await lerMateriais();
     const dd=d||{totalOrdens:0,totalMina:0,totalUsina:0,porMacro:{MINA:0,USINA:0},porSetor:{},porSetorMina:{},porSetorUsina:{},porFamilia:{}}; const mm=m||{total:0,totalPend:0};
-    let html=''; html+='<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'; html+='<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'; html+='<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.big{font-size:22px;font-weight:800}.label{opacity:.7;font-size:12px}@media(max-width:700px){.grid,.kpis{grid-template-columns:1fr}}</style>'; html+='</head><body>'; html+='<h2>ZROF Dashboard V13.6.1</h2>'; html+='<div class="kpis">'; html+='<div class="card"><div class="label">Total Ordens</div><div class="big">'+dd.totalOrdens+'</div></div>'; html+='<div class="card"><div class="label">MINA</div><div class="big">'+dd.totalMina+'</div></div>'; html+='<div class="card"><div class="label">USINA</div><div class="big">'+dd.totalUsina+'</div></div>'; html+='<div class="card"><div class="label">Pendentes BD_MAT</div><div class="big">'+mm.totalPend+'/'+mm.total+'</div></div>'; html+='</div>'; html+='<div class="grid"><div class="card"><h3>Macro Mina x Usina</h3><canvas id="cMacro"></canvas></div><div class="card"><h3>Setor Geral</h3><canvas id="cSetor"></canvas></div></div>'; html+='<div class="grid"><div class="card"><h3>Setor MINA</h3><canvas id="cSetorMina"></canvas></div><div class="card"><h3>Setor USINA</h3><canvas id="cSetorUsina"></canvas></div></div>'; html+='<div class="card"><h3>Familia Top</h3><canvas id="cFam"></canvas></div>'; html+='<p><a href="/api/check" style="color:#38bdf8">Ver /api/check</a></p>'; html+='<script>'; html+='var d='+JSON.stringify(dd)+';'; html+='function sortE(o){return Object.entries(o||{}).sort(function(a,b){return b[1]-a[1]}) }'; html+='new Chart(document.getElementById("cMacro"),{type:"doughnut",data:{labels:Object.keys(d.porMacro),[STRIPPED]
+    let html=''; html+='<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'; html+='<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'; html+='<style>body{background:#0f172a;color:#fff;font-family:system-ui;padding:12px}.card{background:#1e293b;padding:16px;border-radius:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.big{font-size:22px;font-weight:800}.label{opacity:.7;font-size:12px}@media(max-width:700px){.grid,.kpis{grid-template-columns:1fr}}</style>'; html+='</head><body>'; html+='<h2>ZROF Dashboard V13.6.2</h2>'; html+='<div class="kpis">'; html+='<div class="card"><div class="label">Total Ordens</div><div class="big">'+dd.totalOrdens+'</div></div>'; html+='<div class="card"><div class="label">MINA</div><div class="big">'+dd.totalMina+'</div></div>'; html+='<div class="card"><div class="label">USINA</div><div class="big">'+dd.totalUsina+'</div></div>'; html+='<div class="card"><div class="label">Pendentes BD_MAT</div><div class="big">'+mm.totalPend+'/'+mm.total+'</div></div>'; html+='</div>'; html+='<div class="grid"><div class="card"><h3>Macro Mina x Usina</h3><canvas id="cMacro"></canvas></div><div class="card"><h3>Setor Geral</h3><canvas id="cSetor"></canvas></div></div>'; html+='<div class="grid"><div class="card"><h3>Setor MINA</h3><canvas id="cSetorMina"></canvas></div><div class="card"><h3>Setor USINA</h3><canvas id="cSetorUsina"></canvas></div></div>'; html+='<div class="card"><h3>Familia Top</h3><canvas id="cFam"></canvas></div>'; html+='<p><a href="/api/check" style="color:#38bdf8">Ver /api/check</a></p>'; html+='<script>'; html+='var d='+JSON.stringify(dd)+';'; html+='function sortE(o){return Object.entries(o||{}).sort(function(a,b){return b[1]-a[1]}) }'; html+='new Chart(document.getElementById("cMacro"),{type:"doughnut",data:{labels:Object.keys(d.porMacro),[STRIPPED]
     html+='function makeBar(id,obj,color){ var e=sortE(obj).slice(0,12); new Chart(document.getElementById(id),{type:"bar",data:{labels:e.map(function(x){return x[0]}),datasets:[{data:e.map(function(x){return x[1]}),backgroundColor:color}]},options:{indexAxis:"y"}})};'; html+='makeBar("cSetor",d.porSetor,"#a78bfa");'; html+='makeBar("cSetorMina",d.porSetorMina,"#38bdf8");'; html+='makeBar("cSetorUsina",d.porSetorUsina,"#fbbf24");'; html+='makeBar("cFam",d.porFamilia,"#34d399");'; html+='</script></body></html>'; res.send(html);
   }catch(e){ res.send('Erro dashboard '+e.message); }
 });
 
-// BOT DEPOIS DAS ROTAS
 let bot=null;
 if(BOT_TOKEN && Telegraf){
   bot=new Telegraf(BOT_TOKEN);
@@ -113,7 +111,7 @@ if(BOT_TOKEN && Telegraf){
 }
 
 app.listen(PORT,function(){
-  console.log('WEB ON '+PORT+' V13.6.1');
+  console.log('WEB ON '+PORT+' V13.6.2');
   if(bot){
     const domain=process.env.RENDER_EXTERNAL_HOSTNAME;
     if(domain){
@@ -129,8 +127,23 @@ app.listen(PORT,function(){
 if(bot){
   const menu=Markup.keyboard([['Buscar OS','Materiais OS'],['Resumo','Dashboard'],['Limpar']]).resize();
   bot.catch((err)=>console.log('BOT ERRO',err.message));
-  bot.start((ctx)=>ctx.reply('ZROF V13.6.1 Online',menu));
-  bot.hears('Resumo', async (ctx)=>{ const d=await lerPlanilha(); const mm=await lerMateriais(); let txt='RESUMO\nTotal:'+d.totalOrdens+' Mina:'+d.totalMina+' Usina:'+d.totalUsina+'\nPend BD_MAT:'+mm.totalPend+'/'+mm.total+'\n\nSETOR GERAL:\n'; Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; }); txt+='\nMINA:\n'; Object.entries(d.porSetorMina).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; }); txt+='\nUSINA:\n'; Object.entries(d.porSetorUsina).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; }); for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu); });
+  bot.start((ctx)=>ctx.reply('ZROF V13.6.2 Online',menu));
+  bot.hears('Resumo', async (ctx)=>{
+    const d=await lerPlanilha(); const mm=await lerMateriais();
+    const percMina = d.totalOrdens? Math.round(d.totalMina/d.totalOrdens*100) : 0;
+    const percUsina = d.totalOrdens? Math.round(d.totalUsina/d.totalOrdens*100) : 0;
+    const retirados = mm.total - mm.totalPend;
+    const percRet = mm.total? Math.round(retirados/mm.total*100) : 0;
+    let txt='';
+    txt+='RESUMO ZROF\n';
+    txt+='Total: '+d.totalOrdens+' Mina: '+d.totalMina+' ('+percMina+'%) Usina: '+d.totalUsina+' ('+percUsina+'%)\n';
+    txt+='BD_MAT Pend: '+mm.totalPend+'/'+mm.total+' Retirados: '+retirados+' ('+percRet+'%)\n\n';
+    txt+='SETOR GERAL:\n';
+    Object.entries(d.porSetor).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; });
+    txt+='\nMINA:\n'; Object.entries(d.porSetorMina).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; });
+    txt+='\nUSINA:\n'; Object.entries(d.porSetorUsina).sort((a,b)=>b[1]-a[1]).forEach(function(p){ txt+=p[0]+': '+p[1]+'\n'; });
+    for(let i=0;i<txt.length;i+=4000) await ctx.reply(txt.substring(i,i+4000),menu);
+  });
   bot.hears('Dashboard', async (ctx)=>{ const dom=process.env.RENDER_EXTERNAL_HOSTNAME; const url=dom?'https://'+dom+'/dashboard':'/dashboard'; ctx.reply('Dashboard: '+url+'\nCheck: https://'+dom+'/api/check',menu); });
   bot.hears('Limpar', async (ctx)=>{ cache={dados:null,hora:0}; cacheMat={dados:null,hora:0}; await ctx.reply('Limpando...',menu); const d=await lerPlanilha(); const mm=await lerMateriais(); ctx.reply('Ordens:'+d.totalOrdens+' Pend:'+mm.totalPend,menu); });
   bot.hears('Buscar OS',(ctx)=>{ estado[ctx.from.id]='BUSCA'; ctx.reply('Digite OS ou texto:',menu); });
